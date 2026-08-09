@@ -1,0 +1,9 @@
+node_modules/
+.npm-cache/
+.next/
+.vinext/
+build/
+dist/
+.wrangler/
+.DS_Store
+*.log
