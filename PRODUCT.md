@@ -12,6 +12,26 @@ Nigerian finance teams, tax managers, accountants, and tax-practice reviewers wh
 
 Turn fragmented WHT records into an explainable recovery queue. The MVP should detect likely deductions, connect each case to its evidence, expose mismatches without overstating recoverability, coordinate human-approved follow-up, and track cases through recognition and closure. Success means a reviewer can understand and advance a case in minutes, with every conclusion traceable to a source.
 
+## Implemented vertical slice
+
+```text
+CSV ledger -> validate/map -> D1 recovery cases
+Receipt PDF/image -> R2 original -> OpenAI structured extraction
+                                      |
+                                      v
+                         deterministic rule set 2026.07
+                                      |
+                                      v
+                         exception + evidence provenance
+                                      |
+                                      v
+                         reviewer decision -> D1 audit event
+```
+
+AI does not decide recoverability. It converts an unstructured receipt into six typed facts with source snippets and confidence. Matching, exception codes, status transitions, and audit records are application logic.
+
+Current MVP gaps are authentication/tenant isolation, direct-to-R2 multipart upload for larger files, authority-system integration, background job orchestration, editable field-level corrections, rules administration, notifications, and production monitoring.
+
 ## Brand Personality
 
 Assured, forensic, calm. The product should feel like a dependable finance operations instrument: precise enough for practitioners, clear enough for business users, and restrained around uncertain claims.

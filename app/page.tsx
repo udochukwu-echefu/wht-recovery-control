@@ -5,7 +5,6 @@ import {
   ArrowLeft,
   ArrowUpRight,
   BadgeCheck,
-  Banknote,
   BookOpenCheck,
   Check,
   CheckCircle2,
@@ -13,13 +12,10 @@ import {
   CircleAlert,
   Clock3,
   Download,
-  FileCheck2,
   FileSearch2,
   FileText,
   FolderClock,
   Gauge,
-  Inbox,
-  Landmark,
   LayoutDashboard,
   ListFilter,
   Mail,
@@ -31,10 +27,9 @@ import {
   SlidersHorizontal,
   Sparkles,
   Upload,
-  Users,
   X,
 } from "lucide-react";
-import { ChangeEvent, useMemo, useRef, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type CaseStage =
   | "detected"
@@ -78,6 +73,26 @@ type RecoveryCase = {
 };
 
 type View = "overview" | "cases" | "imports" | "rules";
+
+type AiStatus = { configured: boolean; model: string };
+
+type PersistentCase = {
+  id: string;
+  customer: string;
+  customerTin: string;
+  invoiceReference: string;
+  invoiceGrossKobo: number;
+  paymentNetKobo: number;
+  expectedWhtKobo: number;
+  reportingPeriod: string;
+  receiptNumber: string | null;
+  receiptAmountKobo: number | null;
+  receiptBeneficiaryTin: string | null;
+  stage: string;
+  exceptionCode: string;
+  confidence: number;
+  updatedAt: string;
+};
 
 const stageLabels: Record<CaseStage, string> = {
   detected: "Detected",
@@ -269,6 +284,49 @@ const formatNaira = (value: number) =>
     .format(value)
     .replace("NGN", "₦");
 
+const exceptionLabels: Record<string, string> = {
+  RECEIPT_MISSING: "Receipt missing",
+  RECEIPT_FIELDS_MISSING: "Receipt fields missing",
+  TIN_MISMATCH: "TIN mismatch",
+  AMOUNT_MISMATCH: "Amount differs",
+  PERIOD_MISMATCH: "Reporting period differs",
+  NO_OPEN_EXCEPTION: "No open exception",
+};
+
+function persistentCaseToView(item: PersistentCase): RecoveryCase {
+  const stage = Object.hasOwn(stageLabels, item.stage) ? item.stage as CaseStage : "detected";
+  const amount = item.expectedWhtKobo / 100;
+  const receiptAmount = item.receiptAmountKobo === null ? null : item.receiptAmountKobo / 100;
+  const amountMatches = receiptAmount !== null && Math.abs(receiptAmount - amount) <= 100;
+  const tinMatches = Boolean(item.customerTin && item.receiptBeneficiaryTin && item.customerTin.replace(/\W/g, "") === item.receiptBeneficiaryTin.replace(/\W/g, ""));
+  return {
+    id: item.id,
+    customer: item.customer,
+    invoice: item.invoiceReference,
+    amount,
+    stage,
+    exception: exceptionLabels[item.exceptionCode] ?? item.exceptionCode.replaceAll("_", " ").toLowerCase(),
+    age: Math.max(0, Math.floor((Date.now() - new Date(item.updatedAt).getTime()) / 86_400_000)),
+    owner: "Unassigned",
+    confidence: item.confidence,
+    updated: new Date(item.updatedAt).toLocaleString("en-NG", { dateStyle: "medium", timeStyle: "short" }),
+    nextAction: stage === "matched" ? "Review the extracted fields and approve recognition" : stage === "in-dispute" ? "Request a corrected receipt from the deducting customer" : "Attach a WHT receipt to complete the evidence chain",
+    narrative: item.receiptNumber ? "AI extracted the receipt fields. Rule set 2026.07 then compared them with the ledger candidate; the reviewer owns the final decision." : "The ledger payment gap created this candidate. A receipt is still needed before the evidence can be matched.",
+    evidence: [
+      { label: "Invoice", reference: item.invoiceReference, detail: formatNaira(item.invoiceGrossKobo / 100), state: "verified" },
+      { label: "Payment", reference: "Imported ledger", detail: formatNaira(item.paymentNetKobo / 100), state: "verified" },
+      { label: "WHT receipt", reference: item.receiptNumber || "Missing", detail: receiptAmount === null ? "Upload required" : formatNaira(receiptAmount), state: item.receiptNumber ? (item.exceptionCode === "NO_OPEN_EXCEPTION" ? "verified" : "warning") : "missing" },
+      { label: "Authority record", reference: "Not connected", detail: "Future integration", state: "pending" },
+    ],
+    checks: [
+      { label: "Invoice reference", bookValue: item.invoiceReference, evidenceValue: item.receiptNumber ? item.invoiceReference : "Not provided", result: item.receiptNumber ? "match" : "missing" },
+      { label: "Beneficiary TIN", bookValue: item.customerTin || "Not provided", evidenceValue: item.receiptBeneficiaryTin || "Not extracted", result: !item.receiptBeneficiaryTin ? "missing" : tinMatches ? "match" : "mismatch" },
+      { label: "WHT amount", bookValue: formatNaira(amount), evidenceValue: receiptAmount === null ? "Not extracted" : formatNaira(receiptAmount), result: receiptAmount === null ? "missing" : amountMatches ? "match" : "mismatch" },
+      { label: "Reporting period", bookValue: item.reportingPeriod || "Not provided", evidenceValue: item.reportingPeriod || "Not extracted", result: item.reportingPeriod ? "match" : "missing" },
+    ],
+  };
+}
+
 function StageBadge({ stage }: { stage: CaseStage }) {
   return <span className={`stage-badge stage-${stage}`}>{stageLabels[stage]}</span>;
 }
@@ -290,11 +348,39 @@ export default function Home() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [draftVisible, setDraftVisible] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
+  const [aiStatus, setAiStatus] = useState<AiStatus>({ configured: false, model: "gpt-5.6" });
   const [importBatches, setImportBatches] = useState([
     { name: "July WHT ledger.csv", rows: 184, status: "Validated", time: "Today, 08:32" },
     { name: "Receipt bundle 07.pdf", rows: 27, status: "Reviewed", time: "Yesterday, 15:11" },
   ]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    let active = true;
+    const loadPersistentData = async () => {
+      try {
+        const [caseResponse, healthResponse] = await Promise.all([fetch("/api/cases"), fetch("/api/health")]);
+        if (healthResponse.ok) {
+          const health = await healthResponse.json() as { ai?: AiStatus };
+          if (active && health.ai) setAiStatus(health.ai);
+        }
+        if (!caseResponse.ok) return;
+        const data = await caseResponse.json() as {
+          cases?: PersistentCase[];
+          documents?: Array<{ name: string; rows: number; status: string; createdAt: string }>;
+        };
+        if (!active) return;
+        const persisted = (data.cases ?? []).map(persistentCaseToView);
+        setCases((current) => [...persisted, ...current.filter((item) => !persisted.some((saved) => saved.id === item.id))]);
+        if (data.documents?.length) setImportBatches(data.documents.map((document) => ({ name: document.name, rows: document.rows, status: document.status.replaceAll("_", " "), time: new Date(document.createdAt).toLocaleString("en-NG", { dateStyle: "medium", timeStyle: "short" }) })));
+      } catch {
+        // The seeded portfolio remains usable when local bindings have not started yet.
+      }
+    };
+    void loadPersistentData();
+    return () => { active = false; };
+  }, []);
 
   const selectedCase = cases.find((item) => item.id === selectedId) ?? null;
   const openCases = cases.filter((item) => item.stage !== "closed");
@@ -331,7 +417,7 @@ export default function Home() {
     setMobileNavOpen(false);
   };
 
-  const changeCaseStage = (id: string, stage: CaseStage) => {
+  const changeCaseStage = async (id: string, stage: CaseStage) => {
     setCases((current) =>
       current.map((item) =>
         item.id === id
@@ -349,10 +435,19 @@ export default function Home() {
           : item,
       ),
     );
-    notify(stage === "recognised" ? "Case marked as recognised" : "Case closed with audit history preserved");
+    if (id.length > 10) {
+      try {
+        const response = await fetch("/api/review", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ caseId: id, stage, note: "Decision recorded from case workspace" }) });
+        if (!response.ok) throw new Error("Review save failed");
+      } catch {
+        notify("The screen changed, but the persistent review could not be saved");
+        return;
+      }
+    }
+    notify(stage === "recognised" ? "Case marked as recognised and audited" : "Case closed with audit history preserved");
   };
 
-  const handleImport = (event: ChangeEvent<HTMLInputElement>) => {
+  const handleImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
@@ -363,30 +458,32 @@ export default function Home() {
       time: "Just now",
     };
     setImportBatches((current) => [batch, ...current]);
-    notify(`${file.name} added to the intake queue`);
-
-    if (file.name.toLowerCase().endsWith(".csv")) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const rows = String(reader.result ?? "")
-          .split(/\r?\n/)
-          .filter((line) => line.trim()).length;
-        setImportBatches((current) =>
-          current.map((item, index) =>
-            index === 0 ? { ...item, rows: Math.max(rows - 1, 0), status: "Validated" } : item,
-          ),
-        );
-      };
-      reader.readAsText(file);
-    } else {
-      window.setTimeout(() => {
-        setImportBatches((current) =>
-          current.map((item, index) => (index === 0 ? { ...item, status: "Ready for review" } : item)),
-        );
-      }, 900);
-    }
-
+    setIsImporting(true);
     event.target.value = "";
+    try {
+      const form = new FormData();
+      form.set("file", file);
+      const response = await fetch("/api/intake", { method: "POST", body: form });
+      const result = await response.json() as { error?: string; document?: { rows?: number; rowCount?: number; status: string }; importedCases?: number; ai?: { configured?: boolean; message?: string } };
+      if (!response.ok) throw new Error(result.error || "Import failed");
+      const rows = result.document?.rowCount ?? result.document?.rows ?? result.importedCases ?? 1;
+      const status = result.document?.status.replaceAll("_", " ") ?? "Complete";
+      setImportBatches((current) => current.map((item, index) => index === 0 ? { ...item, rows, status } : item));
+      if (result.ai?.configured === false) setAiStatus((current) => ({ ...current, configured: false }));
+      notify(result.ai?.message || `${file.name} processed and saved`);
+      const refresh = await fetch("/api/cases");
+      if (refresh.ok) {
+        const data = await refresh.json() as { cases?: PersistentCase[] };
+        const persisted = (data.cases ?? []).map(persistentCaseToView);
+        setCases((current) => [...persisted, ...current.filter((item) => !persisted.some((saved) => saved.id === item.id))]);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Import failed";
+      setImportBatches((current) => current.map((item, index) => index === 0 ? { ...item, status: "Failed" } : item));
+      notify(message);
+    } finally {
+      setIsImporting(false);
+    }
   };
 
   const copyDraft = async () => {
@@ -538,6 +635,8 @@ export default function Home() {
                 batches={importBatches}
                 fileInputRef={fileInputRef}
                 onImport={handleImport}
+                isImporting={isImporting}
+                aiStatus={aiStatus}
               />
             )}
 
@@ -807,10 +906,14 @@ function ImportsView({
   batches,
   fileInputRef,
   onImport,
+  isImporting,
+  aiStatus,
 }: {
   batches: { name: string; rows: number; status: string; time: string }[];
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   onImport: (event: ChangeEvent<HTMLInputElement>) => void;
+  isImporting: boolean;
+  aiStatus: AiStatus;
 }) {
   return (
     <>
@@ -827,11 +930,12 @@ function ImportsView({
           <div className="upload-symbol"><Upload size={24} /></div>
           <h2>Upload a new batch</h2>
           <p>Invoices, bank payments and customer masters as CSV. WHT receipts and evidence as PDF.</p>
-          <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls,.pdf" onChange={onImport} className="sr-only" />
-          <button className="primary-button" onClick={() => fileInputRef.current?.click()}>
-            Choose file
+          <input ref={fileInputRef} type="file" accept=".csv,.pdf,.png,.jpg,.jpeg,.webp" onChange={onImport} className="sr-only" />
+          <button className="primary-button" onClick={() => fileInputRef.current?.click()} disabled={isImporting}>
+            {isImporting ? <RefreshCw className="spin" size={17} /> : <Upload size={17} />}
+            {isImporting ? "Processing evidence…" : "Choose file"}
           </button>
-          <small>Maximum 25 MB per file · Synthetic data only in this demo</small>
+          <small>Maximum 1 MB per file · CSV ledgers and compressed PDF/image receipts</small>
         </section>
 
         <aside className="intake-guide">
@@ -848,6 +952,10 @@ function ImportsView({
             <li><Check size={16} /> Payment date and net amount</li>
             <li><Check size={16} /> Receipt number, period and beneficiary TIN</li>
           </ul>
+          <div className={`ai-readiness ${aiStatus.configured ? "ready" : "setup"}`}>
+            <Sparkles size={16} />
+            <div><strong>{aiStatus.configured ? "AI extraction active" : "AI key required"}</strong><span>{aiStatus.configured ? `${aiStatus.model} extracts receipt fields; rules make the match.` : "Uploads persist safely; receipt extraction waits for OPENAI_API_KEY."}</span></div>
+          </div>
           <p>Column mapping and validation happen before any recovery case is created.</p>
         </aside>
       </div>
@@ -876,6 +984,7 @@ function ImportsView({
 
 function RulesView() {
   const rules = [
+    { name: "AI receipt extraction", logic: "OpenAI returns receipt facts, confidence and source snippets in a strict schema", control: "AI cannot recognise or close a case", status: "Assistive" },
     { name: "Payment-gap candidate", logic: "Invoice gross less matched payment exceeds configured tolerance", control: "Reviewer confirms applicability", status: "Active" },
     { name: "Beneficiary identity", logic: "Receipt TIN must equal the approved entity master TIN", control: "Exact match required", status: "Active" },
     { name: "Receipt amount", logic: "Expected, receipt and authority amounts are compared separately", control: "Partial states preserved", status: "Active" },
@@ -888,7 +997,7 @@ function RulesView() {
         <div>
           <p className="eyebrow">Decision controls</p>
           <h1>Rules & controls</h1>
-          <p>Deterministic checks first. Practitioner judgment remains visible and accountable.</p>
+          <p>AI extracts document facts. Deterministic rules compare them. Practitioner judgment remains visible and accountable.</p>
         </div>
       </section>
 
