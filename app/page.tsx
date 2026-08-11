@@ -74,7 +74,7 @@ type RecoveryCase = {
 
 type View = "overview" | "cases" | "imports" | "rules";
 
-type AiStatus = { configured: boolean; model: string };
+type AiStatus = { configured: boolean; model: string; provider?: string; release?: string };
 
 type PersistentCase = {
   id: string;
@@ -349,7 +349,7 @@ export default function Home() {
   const [draftVisible, setDraftVisible] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [isImporting, setIsImporting] = useState(false);
-  const [aiStatus, setAiStatus] = useState<AiStatus>({ configured: false, model: "gpt-5.6" });
+  const [aiStatus, setAiStatus] = useState<AiStatus>({ configured: false, model: "deepseek-v4-flash", provider: "DeepSeek", release: "V4 Flash 0731" });
   const [importBatches, setImportBatches] = useState([
     { name: "July WHT ledger.csv", rows: 184, status: "Validated", time: "Today, 08:32" },
     { name: "Receipt bundle 07.pdf", rows: 27, status: "Reviewed", time: "Yesterday, 15:11" },
@@ -447,10 +447,7 @@ export default function Home() {
     notify(stage === "recognised" ? "Case marked as recognised and audited" : "Case closed with audit history preserved");
   };
 
-  const handleImport = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
+  const processUpload = async (file: File, documentText?: string) => {
     const batch = {
       name: file.name,
       rows: file.name.toLowerCase().endsWith(".pdf") ? 1 : 0,
@@ -459,10 +456,10 @@ export default function Home() {
     };
     setImportBatches((current) => [batch, ...current]);
     setIsImporting(true);
-    event.target.value = "";
     try {
       const form = new FormData();
       form.set("file", file);
+      if (documentText) form.set("documentText", documentText);
       const response = await fetch("/api/intake", { method: "POST", body: form });
       const result = await response.json() as { error?: string; document?: { rows?: number; rowCount?: number; status: string }; importedCases?: number; ai?: { configured?: boolean; message?: string } };
       if (!response.ok) throw new Error(result.error || "Import failed");
@@ -484,6 +481,17 @@ export default function Home() {
     } finally {
       setIsImporting(false);
     }
+  };
+
+  const handleImport = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (file) await processUpload(file);
+  };
+
+  const handleReceiptText = async (text: string) => {
+    const fileName = `wht-receipt-text-${new Date().toISOString().slice(0, 10)}.txt`;
+    await processUpload(new File([text], fileName, { type: "text/plain" }), text);
   };
 
   const copyDraft = async () => {
@@ -635,6 +643,7 @@ export default function Home() {
                 batches={importBatches}
                 fileInputRef={fileInputRef}
                 onImport={handleImport}
+                onReceiptText={handleReceiptText}
                 isImporting={isImporting}
                 aiStatus={aiStatus}
               />
@@ -906,15 +915,26 @@ function ImportsView({
   batches,
   fileInputRef,
   onImport,
+  onReceiptText,
   isImporting,
   aiStatus,
 }: {
   batches: { name: string; rows: number; status: string; time: string }[];
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   onImport: (event: ChangeEvent<HTMLInputElement>) => void;
+  onReceiptText: (text: string) => Promise<void>;
   isImporting: boolean;
   aiStatus: AiStatus;
 }) {
+  const [receiptText, setReceiptText] = useState("");
+
+  const submitReceiptText = async () => {
+    const text = receiptText.trim();
+    if (text.length < 20) return;
+    await onReceiptText(text);
+    setReceiptText("");
+  };
+
   return (
     <>
       <section className="page-heading compact-heading">
@@ -929,13 +949,13 @@ function ImportsView({
         <section className="upload-zone">
           <div className="upload-symbol"><Upload size={24} /></div>
           <h2>Upload a new batch</h2>
-          <p>Invoices, bank payments and customer masters as CSV. WHT receipts and evidence as PDF.</p>
-          <input ref={fileInputRef} type="file" accept=".csv,.pdf,.png,.jpg,.jpeg,.webp" onChange={onImport} className="sr-only" />
+          <p>Upload ledgers as CSV. PDF and image originals are retained for the OCR stage; receipt text goes to DeepSeek.</p>
+          <input ref={fileInputRef} type="file" accept=".csv,.txt,.pdf,.png,.jpg,.jpeg,.webp" onChange={onImport} className="sr-only" />
           <button className="primary-button" onClick={() => fileInputRef.current?.click()} disabled={isImporting}>
             {isImporting ? <RefreshCw className="spin" size={17} /> : <Upload size={17} />}
             {isImporting ? "Processing evidence…" : "Choose file"}
           </button>
-          <small>Maximum 1 MB per file · CSV ledgers and compressed PDF/image receipts</small>
+          <small>Maximum 1 MB per file · CSV/TXT or compressed PDF/image evidence</small>
         </section>
 
         <aside className="intake-guide">
@@ -954,11 +974,27 @@ function ImportsView({
           </ul>
           <div className={`ai-readiness ${aiStatus.configured ? "ready" : "setup"}`}>
             <Sparkles size={16} />
-            <div><strong>{aiStatus.configured ? "AI extraction active" : "AI key required"}</strong><span>{aiStatus.configured ? `${aiStatus.model} extracts receipt fields; rules make the match.` : "Uploads persist safely; receipt extraction waits for OPENAI_API_KEY."}</span></div>
+            <div><strong>{aiStatus.configured ? "DeepSeek extraction active" : "DeepSeek key required"}</strong><span>{aiStatus.configured ? `${aiStatus.release || aiStatus.model} extracts receipt text; rules make the match.` : "Uploads persist safely; text extraction waits for DEEPSEEK_API_KEY."}</span></div>
           </div>
           <p>Column mapping and validation happen before any recovery case is created.</p>
         </aside>
       </div>
+
+      <section className="receipt-text-panel">
+        <div>
+          <p className="section-kicker">DeepSeek text intake</p>
+          <h2>Paste receipt text or OCR output</h2>
+          <p>DeepSeek V4 Flash 0731 is text-only. Paste text from a digital PDF or OCR scan; the original file can still be uploaded separately for provenance.</p>
+        </div>
+        <label>
+          <span className="sr-only">WHT receipt text</span>
+          <textarea value={receiptText} onChange={(event) => setReceiptText(event.target.value)} placeholder="Receipt no: RCP-22814&#10;Beneficiary TIN: 01234567-0001&#10;Invoice: INV-1042&#10;WHT amount: NGN 750,000&#10;Period: March 2026" />
+        </label>
+        <button className="primary-button" disabled={isImporting || receiptText.trim().length < 20} onClick={() => void submitReceiptText()}>
+          {isImporting ? <RefreshCw className="spin" size={17} /> : <Sparkles size={17} />}
+          Extract with DeepSeek
+        </button>
+      </section>
 
       <section className="work-panel batch-panel">
         <div className="section-heading">
@@ -984,7 +1020,7 @@ function ImportsView({
 
 function RulesView() {
   const rules = [
-    { name: "AI receipt extraction", logic: "OpenAI returns receipt facts, confidence and source snippets in a strict schema", control: "AI cannot recognise or close a case", status: "Assistive" },
+    { name: "AI receipt extraction", logic: "DeepSeek V4 Flash 0731 converts receipt text into source-grounded fields", control: "AI cannot recognise or close a case", status: "Assistive" },
     { name: "Payment-gap candidate", logic: "Invoice gross less matched payment exceeds configured tolerance", control: "Reviewer confirms applicability", status: "Active" },
     { name: "Beneficiary identity", logic: "Receipt TIN must equal the approved entity master TIN", control: "Exact match required", status: "Active" },
     { name: "Receipt amount", logic: "Expected, receipt and authority amounts are compared separately", control: "Partial states preserved", status: "Active" },

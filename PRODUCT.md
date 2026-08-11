@@ -16,10 +16,13 @@ Turn fragmented WHT records into an explainable recovery queue. The MVP should d
 
 ```text
 CSV ledger -> validate/map -> D1 recovery cases
-Receipt PDF/image -> R2 original -> OpenAI structured extraction
-                                      |
-                                      v
-                         deterministic rule set 2026.07
+Receipt PDF/image -> R2 original -> OCR/PDF text stage
+Receipt TXT/paste --------------------------|
+                                            v
+                              DeepSeek V4 Flash 0731
+                                            |
+                                            v
+                              deterministic rule set 2026.07
                                       |
                                       v
                          exception + evidence provenance
@@ -28,9 +31,9 @@ Receipt PDF/image -> R2 original -> OpenAI structured extraction
                          reviewer decision -> D1 audit event
 ```
 
-AI does not decide recoverability. It converts an unstructured receipt into six typed facts with source snippets and confidence. Matching, exception codes, status transitions, and audit records are application logic.
+AI does not decide recoverability. DeepSeek converts receipt text into six typed facts with source snippets and confidence. Matching, exception codes, status transitions, and audit records are application logic.
 
-Current MVP gaps are authentication/tenant isolation, direct-to-R2 multipart upload for larger files, authority-system integration, background job orchestration, editable field-level corrections, rules administration, notifications, and production monitoring.
+Current MVP gaps are authentication/tenant isolation, production OCR for scans and image-only PDFs, direct-to-R2 multipart upload for larger files, authority-system integration, background job orchestration, editable field-level corrections, rules administration, notifications, and production monitoring.
 
 ## Brand Personality
 

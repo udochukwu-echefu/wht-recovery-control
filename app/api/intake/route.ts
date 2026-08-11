@@ -1,15 +1,15 @@
 import { and, desc, eq, ne } from "drizzle-orm";
-import { getDb, getEvidenceBucket, getOpenAIConfig } from "@/db";
+import { getDb, getDeepSeekConfig, getEvidenceBucket } from "@/db";
 import { ensureSchema } from "@/db/ensure";
 import { auditEvents, evidenceDocuments, extractedFields, recoveryCases } from "@/db/schema";
 import { parseLedgerCsv } from "@/lib/csv";
 import { chooseReceiptCandidate, evaluateReceiptMatch } from "@/lib/matching";
-import { extractReceipt } from "@/lib/openai-extraction";
+import { extractReceiptText } from "@/lib/deepseek-extraction";
 
 export const runtime = "edge";
 
 const MAX_FILE_BYTES = 1024 * 1024;
-const allowedTypes = new Set(["text/csv", "application/vnd.ms-excel", "application/pdf", "image/png", "image/jpeg", "image/webp"]);
+const allowedTypes = new Set(["text/csv", "text/plain", "application/pdf", "image/png", "image/jpeg", "image/webp"]);
 
 function jsonError(error: unknown, status = 500) {
   const message = error instanceof Error ? error.message : "Unexpected intake error.";
@@ -42,9 +42,10 @@ export async function POST(request: Request) {
 
     const lowerName = upload.name.toLowerCase();
     const isCsv = lowerName.endsWith(".csv") || upload.type === "text/csv";
-    const isReceipt = lowerName.endsWith(".pdf") || upload.type.startsWith("image/");
+    const isTextReceipt = lowerName.endsWith(".txt") || upload.type === "text/plain";
+    const isReceipt = isTextReceipt || lowerName.endsWith(".pdf") || upload.type.startsWith("image/");
     if ((!allowedTypes.has(upload.type) && !isCsv && !isReceipt) || (!isCsv && !isReceipt)) {
-      return jsonError(new Error("Use CSV for ledgers or PDF/PNG/JPEG/WebP for receipts."), 415);
+      return jsonError(new Error("Use CSV for ledgers, or TXT/PDF/PNG/JPEG/WebP for receipts."), 415);
     }
 
     const bytes = await upload.arrayBuffer();
@@ -87,14 +88,28 @@ export async function POST(request: Request) {
       return Response.json({ document: { id: documentId, fileName: upload.name, status: "validated", rowCount: parsed.rows.length }, importedCases: parsed.rows.length, warnings: parsed.errors }, { status: 201 });
     }
 
-    const config = getOpenAIConfig();
-    if (!config.apiKey) {
-      await db.update(evidenceDocuments).set({ status: "ai_configuration_required" }).where(eq(evidenceDocuments.id, documentId));
-      await db.insert(auditEvents).values({ id: crypto.randomUUID(), documentId, eventType: "AI_EXTRACTION_DEFERRED", actor: "system", detailJson: JSON.stringify({ reason: "OPENAI_API_KEY is not configured" }) });
-      return Response.json({ document: { id: documentId, fileName: upload.name, status: "ai_configuration_required", rowCount: 1 }, ai: { configured: false, message: "Original saved. Configure OPENAI_API_KEY to extract receipt fields." } }, { status: 202 });
+    const suppliedText = form.get("documentText");
+    const documentText = isTextReceipt
+      ? new TextDecoder().decode(bytes)
+      : typeof suppliedText === "string" ? suppliedText.trim() : "";
+
+    if (!documentText) {
+      await db.update(evidenceDocuments).set({ status: "text_extraction_required" }).where(eq(evidenceDocuments.id, documentId));
+      await db.insert(auditEvents).values({ id: crypto.randomUUID(), documentId, eventType: "AI_EXTRACTION_DEFERRED", actor: "system", detailJson: JSON.stringify({ reason: "DeepSeek V4 Flash is text-only; OCR or PDF text extraction is required" }) });
+      return Response.json({
+        document: { id: documentId, fileName: upload.name, status: "text_extraction_required", rowCount: 1 },
+        ai: { requiresText: true, message: "Original saved. DeepSeek needs extracted text; paste OCR/PDF text to continue." },
+      }, { status: 202 });
     }
 
-    const ai = await extractReceipt({ file: new File([bytes], upload.name, { type: upload.type }), apiKey: config.apiKey, model: config.model });
+    const config = getDeepSeekConfig();
+    if (!config.apiKey) {
+      await db.update(evidenceDocuments).set({ status: "ai_configuration_required" }).where(eq(evidenceDocuments.id, documentId));
+      await db.insert(auditEvents).values({ id: crypto.randomUUID(), documentId, eventType: "AI_EXTRACTION_DEFERRED", actor: "system", detailJson: JSON.stringify({ reason: "DEEPSEEK_API_KEY is not configured" }) });
+      return Response.json({ document: { id: documentId, fileName: upload.name, status: "ai_configuration_required", rowCount: 1 }, ai: { configured: false, message: "Receipt text saved. Configure DEEPSEEK_API_KEY to extract fields." } }, { status: 202 });
+    }
+
+    const ai = await extractReceiptText({ documentText, apiKey: config.apiKey, model: config.model });
     const extractedValues: Record<string, string> = {
       customer_name: ai.extraction.customerName,
       beneficiary_tin: ai.extraction.beneficiaryTin,
@@ -136,7 +151,7 @@ export async function POST(request: Request) {
       await db.insert(auditEvents).values({ id: crypto.randomUUID(), documentId, eventType: "RECEIPT_UNMATCHED", actor: "system", detailJson: JSON.stringify({ invoiceReference: ai.extraction.invoiceReference }) });
     }
     await db.update(evidenceDocuments).set({ status: selected ? "ready_for_review" : "unmatched", rowCount: 1, aiModel: ai.model, aiResponseId: ai.responseId }).where(eq(evidenceDocuments.id, documentId));
-    return Response.json({ document: { id: documentId, fileName: upload.name, status: selected ? "ready_for_review" : "unmatched", rowCount: 1 }, ai: { configured: true, model: ai.model, extraction: ai.extraction }, match }, { status: 201 });
+    return Response.json({ document: { id: documentId, fileName: upload.name, status: selected ? "ready_for_review" : "unmatched", rowCount: 1 }, ai: { configured: true, provider: "deepseek", model: ai.model, extraction: ai.extraction }, match }, { status: 201 });
   } catch (error) {
     if (documentPersisted && persistedDocumentId) {
       try {

@@ -26,9 +26,9 @@ export function getEvidenceBucket() {
   return env.EVIDENCE;
 }
 
-export function getOpenAIConfig() {
+export function getDeepSeekConfig() {
   return {
-    apiKey: env.OPENAI_API_KEY?.trim() ?? "",
-    model: env.OPENAI_MODEL?.trim() || "gpt-5.6",
+    apiKey: env.DEEPSEEK_API_KEY?.trim() ?? "",
+    model: env.DEEPSEEK_MODEL?.trim() || "deepseek-v4-flash",
   };
 }

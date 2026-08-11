@@ -40,3 +40,15 @@ test("starter preview is removed and product metadata is present", async () => {
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));
 });
+
+test("DeepSeek V4 Flash is the only receipt interpretation provider", async () => {
+  const [extractor, environment] = await Promise.all([
+    readFile(new URL("../lib/deepseek-extraction.ts", import.meta.url), "utf8"),
+    readFile(new URL("../.env.example", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(extractor, /api\.deepseek\.com\/beta\/chat\/completions/);
+  assert.match(extractor, /extract_wht_receipt/);
+  assert.match(environment, /DEEPSEEK_MODEL=deepseek-v4-flash/);
+  await assert.rejects(access(new URL("../lib/openai-extraction.ts", import.meta.url)));
+});
