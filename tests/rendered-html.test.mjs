@@ -21,7 +21,8 @@ test("server-renders the WHT recovery workspace", async () => {
 
   const html = await response.text();
   assert.match(html, /<title>WHT Recovery Control Workspace<\/title>/i);
-  assert.match(html, /Recovery control centre/i);
+  assert.match(html, /Recovery overview/i);
+  assert.match(html, /Needs intervention/i);
   assert.match(html, /Priority recovery queue/i);
   assert.match(html, /Alpha Energy/i);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/i);
@@ -34,21 +35,46 @@ test("starter preview is removed and product metadata is present", async () => {
     readFile(new URL("../package.json", import.meta.url), "utf8"),
   ]);
 
-  assert.match(page, /Turn evidence gaps into next actions\./);
+  assert.match(page, /Recovery overview/);
   assert.match(page, /Human approval required/);
+  assert.doesNotMatch(page, /Turn evidence gaps into next actions\./);
+  assert.doesNotMatch(page, /Bring the source records together\./);
   assert.match(layout, /WHT Recovery Control Workspace/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));
 });
 
-test("DeepSeek V4 Flash is the only receipt interpretation provider", async () => {
-  const [extractor, environment] = await Promise.all([
-    readFile(new URL("../lib/deepseek-extraction.ts", import.meta.url), "utf8"),
+test("AI provider abstraction keeps a deterministic demo and manual fallback", async () => {
+  const [providers, contracts, environment] = await Promise.all([
+    readFile(new URL("../lib/ai/providers.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/ai/contracts.ts", import.meta.url), "utf8"),
     readFile(new URL("../.env.example", import.meta.url), "utf8"),
   ]);
 
-  assert.match(extractor, /api\.deepseek\.com\/beta\/chat\/completions/);
-  assert.match(extractor, /extract_wht_receipt/);
+  assert.match(providers, /DemoAiProvider/);
+  assert.match(providers, /ManualReviewProvider/);
+  assert.match(providers, /DeepSeekAiProvider/);
+  assert.match(contracts, /candidate_ranking/);
+  assert.match(contracts, /case_copilot/);
   assert.match(environment, /DEEPSEEK_MODEL=deepseek-v4-flash/);
-  await assert.rejects(access(new URL("../lib/openai-extraction.ts", import.meta.url)));
+  assert.match(environment, /AI_PROVIDER=auto/);
+});
+
+test("reviewer corrections are audited before recognition", async () => {
+  const [page, reviewRoute, schemaEnsure, matching] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/review/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../db/ensure.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/matching.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(page, /Review extracted receipt/);
+  assert.match(page, /Required before recognition/);
+  assert.match(reviewRoute, /EXTRACTION_REVIEW_COMPLETED/);
+  assert.match(reviewRoute, /Add a review note of at least 10 characters/);
+  assert.match(reviewRoute, /Recognition is blocked until deterministic matching has no open exception/);
+  assert.match(reviewRoute, /Recognition is blocked until an authority record is connected and verified/);
+  assert.match(schemaEnsure, /audit_events_no_update/);
+  assert.match(schemaEnsure, /audit_events_no_delete/);
+  assert.match(matching, /INVOICE_MISMATCH/);
 });

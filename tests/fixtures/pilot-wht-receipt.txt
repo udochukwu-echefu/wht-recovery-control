@@ -1,0 +1,7 @@
+Receipt no: RCP-KORA-001
+Customer: Kora Infrastructure
+Beneficiary TIN: 09123456-0001
+Invoice: INV-KORA-001
+WHT amount: NGN 250,000
+Reporting period: July 2026
+Issuing authority: Federal Inland Revenue Service
