@@ -963,12 +963,15 @@ export default function Home() {
       } catch (error) { notify(error instanceof Error ? error.message : "Audit pack could not be generated"); }
       return;
     }
-    let assistedSummary: EvidenceSummary | null = null;
-    try {
-      const response = await fetch("/api/assistant", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "evidence-summary", caseId: selectedCase.id, documentId: selectedCase.sourceDocumentId, facts: { customer: selectedCase.customer, invoice: selectedCase.invoice, narrative: selectedCase.narrative, exception: selectedCase.exception, communicationStatus: "No external communication has been sent by the application.", historySummary: `Current stage: ${stageLabels[selectedCase.stage]}. Last movement: ${selectedCase.updated}.`, outstanding: selectedCase.evidence.filter((item) => item.state !== "verified").map((item) => `${item.label}: ${item.detail}`), checks: selectedCase.checks } }) });
-      const result = await response.json() as { output?: EvidenceSummary };
-      if (response.ok && result.output) assistedSummary = result.output;
-    } catch { /* The deterministic report remains available when assistance is offline. */ }
+    const outstandingEvidence = selectedCase.evidence.filter((item) => item.state !== "verified");
+    const assistedSummary: EvidenceSummary = {
+      executiveSummary: selectedCase.narrative,
+      exceptionNarrative: `${selectedCase.exception}. Current status: ${stageLabels[selectedCase.stage]}.`,
+      correspondenceSummary: "No external communication has been sent from this synthetic demo case.",
+      resolutionHistory: `Last recorded demo movement: ${selectedCase.updated}.`,
+      outstandingItemsSummary: outstandingEvidence.length ? outstandingEvidence.map((item) => `${item.label}: ${item.detail}`).join("; ") : "No outstanding evidence is shown.",
+      sourceLabels: ["Synthetic case record", "Displayed evidence chain", "Deterministic field comparison"],
+    };
     const escape = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
     const assistedHtml = assistedSummary ? `<h2>AI-assisted evidence summary</h2><p>${escape(assistedSummary.executiveSummary)}</p><p><strong>Exception:</strong> ${escape(assistedSummary.exceptionNarrative)}</p><p><strong>Correspondence:</strong> ${escape(assistedSummary.correspondenceSummary)}</p><p><strong>Resolution history:</strong> ${escape(assistedSummary.resolutionHistory)}</p><p><strong>Outstanding:</strong> ${escape(assistedSummary.outstandingItemsSummary)}</p><small>Sources: ${escape(assistedSummary.sourceLabels.join(" · "))}</small>` : `<h2>Evidence summary</h2><p>${escape(selectedCase.narrative)}</p><p>AI assistance was unavailable; this section contains the current deterministic case narrative.</p>`;
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>${escape(selectedCase.id)} evidence report</title><style>body{font:14px Inter,Arial,sans-serif;color:#172019;margin:40px}h1{font-size:26px}h2{font-size:17px;margin-top:28px}header{border-bottom:2px solid #673d65;padding-bottom:18px}.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.box{border:1px solid #dfe4e0;padding:12px}table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid #dfe4e0;padding:9px}.notice{margin-top:32px;padding:12px;border-left:3px solid #b17aab;background:#f5eef4}@media print{body{margin:20mm}.no-print{display:none}}</style></head><body><header><small>WHT Recovery Control · Practitioner evidence report</small><h1>${escape(selectedCase.customer)}</h1><p>${escape(selectedCase.id)} · ${escape(selectedCase.invoice)} · Generated ${new Date().toLocaleString("en-NG")}</p></header><h2>Case summary</h2><div class="meta"><div class="box"><small>Expected WHT</small><br><strong>${escape(formatNaira(selectedCase.amount))}</strong></div><div class="box"><small>Status</small><br><strong>${escape(stageLabels[selectedCase.stage])}</strong></div><div class="box"><small>Exception</small><br><strong>${escape(selectedCase.exception)}</strong></div></div>${assistedHtml}<h2>Evidence chain</h2><table><thead><tr><th>Record</th><th>Reference</th><th>Position</th><th>State</th></tr></thead><tbody>${selectedCase.evidence.map((item) => `<tr><td>${escape(item.label)}</td><td>${escape(item.reference)}</td><td>${escape(item.detail)}</td><td>${escape(item.state)}</td></tr>`).join("")}</tbody></table><h2>Deterministic comparison</h2><table><thead><tr><th>Field</th><th>Books</th><th>Evidence</th><th>Result</th></tr></thead><tbody>${selectedCase.checks.map((item) => `<tr><td>${escape(item.label)}</td><td>${escape(item.bookValue)}</td><td>${escape(item.evidenceValue)}</td><td>${escape(item.result)}</td></tr>`).join("")}</tbody></table><h2>Current action</h2><p><strong>Next action:</strong> ${escape(selectedCase.nextAction)}</p><div class="notice"><strong>Practitioner validation required.</strong> This report preserves the application state at generation time. AI-assisted text does not recognise, utilise, close or write off a credit.</div></body></html>`;
@@ -1109,6 +1112,7 @@ export default function Home() {
 
         {selectedCase ? (
           <CaseWorkspace
+            mode={appMode}
             recoveryCase={selectedCase}
             draftVisible={draftVisible}
             onBack={() => { setSelectedId(null); window.scrollTo(0, 0); }}
@@ -1125,6 +1129,7 @@ export default function Home() {
           <div className="content-area">
             {view === "overview" && (
               <Overview
+                mode={appMode}
                 cases={cases}
                 openAmount={openAmount}
                 recognisedAmount={recognisedAmount}
@@ -1175,7 +1180,7 @@ export default function Home() {
             )}
 
             {view === "rules" && <RulesView mode={appMode} onNotify={notify} />}
-            {view === "ai-activity" && <AiActivityView onNotify={notify} onOpenCase={openCase} />}
+            {view === "ai-activity" && <AiActivityView key={appMode} mode={appMode} onNotify={notify} onOpenCase={openCase} />}
             {view === "settings" && <SettingsView mode={appMode} session={session} onNotify={notify} onSwitchLive={() => switchMode("live")} onToggleTheme={toggleTheme} />}
           </div>
         )}
@@ -1192,6 +1197,7 @@ export default function Home() {
 }
 
 function Overview({
+  mode,
   cases,
   openAmount,
   recognisedAmount,
@@ -1200,6 +1206,7 @@ function Overview({
   onViewCases,
   onFilterCases,
 }: {
+  mode: AppMode;
   cases: RecoveryCase[];
   openAmount: number;
   recognisedAmount: number;
@@ -1255,7 +1262,7 @@ function Overview({
         </div>
       </section>
 
-      <PortfolioBriefingPanel cases={cases} onFilterCases={onFilterCases} />
+      <PortfolioBriefingPanel mode={mode} cases={cases} onFilterCases={onFilterCases} />
 
       <div className="overview-grid">
         <section className="work-panel priority-panel">
@@ -1690,7 +1697,7 @@ function ImportsView({
   );
 }
 
-function PortfolioBriefingPanel({ cases, onFilterCases }: { cases: RecoveryCase[]; onFilterCases: (filter: CaseFilter) => void }) {
+function PortfolioBriefingPanel({ mode, cases, onFilterCases }: { mode: AppMode; cases: RecoveryCase[]; onFilterCases: (filter: CaseFilter) => void }) {
   const [briefing, setBriefing] = useState<{ narrative: string; statements: Array<{ text: string; filter: string; caseIds: string[] }>; dataQualityWarning: string; sourceLabels: string[] } | null>(null);
   const [loading, setLoading] = useState(false);
   const generate = async () => {
@@ -1698,6 +1705,17 @@ function PortfolioBriefingPanel({ cases, onFilterCases }: { cases: RecoveryCase[
     const largest = intervention.toSorted((a, b) => b.amount - a.amount)[0];
     setLoading(true);
     try {
+      if (mode === "demo") {
+        setBriefing({
+          narrative: intervention.length
+            ? `${intervention.length} demo cases require intervention, led by ${largest?.customer ?? "the highest-value exception"}.`
+            : "No demo cases currently require intervention.",
+          statements: [{ text: "Open the intervention queue", filter: "needs-intervention", caseIds: intervention.map((item) => item.id) }],
+          dataQualityWarning: `${cases.filter((item) => item.confidence < 70).length} demo cases have evidence confidence below 70%.`,
+          sourceLabels: ["Synthetic case portfolio", "Deterministic demo totals"],
+        });
+        return;
+      }
       const response = await fetch("/api/assistant", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "portfolio-briefing", facts: { caseIds: cases.map((item) => item.id), interventionCount: intervention.length, interventionFormatted: formatNaira(intervention.reduce((sum, item) => sum + item.amount, 0)), interventionCaseIds: intervention.map((item) => item.id), largestCustomer: largest?.customer ?? "No blocked case", largestException: largest?.exception ?? "No open exception", largestCaseId: largest?.id ?? "", dataQualityWarning: `${cases.filter((item) => item.confidence < 70).length} cases have evidence confidence below 70%.` } }) });
       const result = await response.json() as { output?: typeof briefing };
       if (response.ok && result.output) setBriefing(result.output);
@@ -1708,6 +1726,16 @@ function PortfolioBriefingPanel({ cases, onFilterCases }: { cases: RecoveryCase[
 
 type AiActivityJob = { id: string; taskType: string; status: string; provider: string; model: string; promptVersion: string; inputHash: string; confidence: number | null; latencyMs: number | null; validationOutcome: string; sourceReferences: Array<{ type: string; id: string; label: string }>; caseId: string | null; documentId: string | null; errorCode: string | null; errorMessage: string | null; createdAt: string; completedAt: string | null; output?: unknown; humanCorrection?: unknown };
 type AiActivityStatus = "completed" | "needs_review" | "failed" | "running";
+
+function demoAiActivityJobs(anchor = Date.now()): AiActivityJob[] {
+  const timestamp = (minutesAgo: number) => new Date(anchor - minutesAgo * 60_000).toISOString();
+  return [
+    { id: "demo-job-004", taskType: "case_copilot", status: "completed", provider: "Demo assistant", model: "Synthetic response", promptVersion: "case-copilot.v1", inputHash: "demo-004", confidence: 94, latencyMs: 780, validationOutcome: "validated", sourceReferences: [{ type: "case", id: "WHT-0241", label: "Alpha Energy" }], caseId: "WHT-0241", documentId: null, errorCode: null, errorMessage: null, createdAt: timestamp(18), completedAt: timestamp(17), output: { summary: "Explained the evidence exception using synthetic case facts." } },
+    { id: "demo-job-003", taskType: "receipt_extraction", status: "manual_review", provider: "Demo assistant", model: "Synthetic extraction", promptVersion: "receipt-extraction.v2", inputHash: "demo-003", confidence: 72, latencyMs: 1240, validationOutcome: "manual_review", sourceReferences: [{ type: "document", id: "DEMO-RCP-238", label: "Metro Foods receipt" }], caseId: "WHT-0238", documentId: "DEMO-RCP-238", errorCode: null, errorMessage: null, createdAt: timestamp(74), completedAt: timestamp(73), output: { summary: "Receipt fields extracted; reviewer confirmation required." } },
+    { id: "demo-job-002", taskType: "candidate_ranking", status: "completed", provider: "Demo assistant", model: "Synthetic ranking", promptVersion: "candidate-ranking.v1", inputHash: "demo-002", confidence: 88, latencyMs: 630, validationOutcome: "validated", sourceReferences: [{ type: "case", id: "WHT-0234", label: "Civic Works" }], caseId: "WHT-0234", documentId: null, errorCode: null, errorMessage: null, createdAt: timestamp(132), completedAt: timestamp(131), output: { summary: "Candidate ordering checked against deterministic value and age rules." } },
+    { id: "demo-job-001", taskType: "exception_explanation", status: "completed", provider: "Demo assistant", model: "Synthetic explanation", promptVersion: "exception-explanation.v1", inputHash: "demo-001", confidence: 91, latencyMs: 910, validationOutcome: "validated", sourceReferences: [{ type: "case", id: "WHT-0229", label: "Northstar Ltd" }], caseId: "WHT-0229", documentId: null, errorCode: null, errorMessage: null, createdAt: timestamp(245), completedAt: timestamp(244), output: { summary: "Partial-match exception translated into practitioner language." } },
+  ];
+}
 
 const aiTaskLabels: Record<string, string> = {
   case_copilot: "Case copilot",
@@ -1755,9 +1783,9 @@ function shortenContext(value: string) {
   return `${value.slice(0, 8)}…${value.slice(-5)}`;
 }
 
-function AiActivityView({ onNotify, onOpenCase }: { onNotify: (message: string) => void; onOpenCase: (id: string) => void }) {
-  const [jobs, setJobs] = useState<AiActivityJob[]>([]);
-  const [loading, setLoading] = useState(true);
+function AiActivityView({ mode, onNotify, onOpenCase }: { mode: AppMode; onNotify: (message: string) => void; onOpenCase: (id: string) => void }) {
+  const [jobs, setJobs] = useState<AiActivityJob[]>(() => mode === "demo" ? demoAiActivityJobs() : []);
+  const [loading, setLoading] = useState(mode === "live");
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<AiActivityJob | null>(null);
   const [range, setRange] = useState("24h");
@@ -1774,6 +1802,10 @@ function AiActivityView({ onNotify, onOpenCase }: { onNotify: (message: string) 
     setLoading(true);
     setError("");
     try {
+      if (mode === "demo") {
+        setJobs(demoAiActivityJobs());
+        return;
+      }
       const response = await fetch("/api/assistant");
       const result = await response.json() as { jobs?: AiActivityJob[]; error?: string };
       if (!response.ok) throw new Error(result.error || "AI activity is unavailable");
@@ -1785,9 +1817,10 @@ function AiActivityView({ onNotify, onOpenCase }: { onNotify: (message: string) 
     } finally {
       setLoading(false);
     }
-  }, [onNotify]);
+  }, [mode, onNotify]);
 
   useEffect(() => {
+    if (mode === "demo") return;
     let active = true;
     fetch("/api/assistant").then(async (response) => {
       const result = await response.json() as { jobs?: AiActivityJob[]; error?: string };
@@ -1799,7 +1832,7 @@ function AiActivityView({ onNotify, onOpenCase }: { onNotify: (message: string) 
       onNotify(message);
     }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [onNotify]);
+  }, [mode, onNotify]);
 
   const rangedJobs = useMemo(() => {
     if (range === "all") return jobs;
@@ -2116,6 +2149,7 @@ function RulesView({ mode, onNotify }: { mode: AppMode; onNotify: (message: stri
 }
 
 function CaseWorkspace({
+  mode,
   recoveryCase,
   draftVisible,
   onBack,
@@ -2128,6 +2162,7 @@ function CaseWorkspace({
   onNotify,
   onAttachReceipt,
 }: {
+  mode: AppMode;
   recoveryCase: RecoveryCase;
   draftVisible: boolean;
   onBack: () => void;
@@ -2194,6 +2229,46 @@ function CaseWorkspace({
   const runAssistant = async (action: "recovery-plan" | "communication-draft" | "copilot") => {
     setAssistantLoading(action);
     try {
+      if (mode === "demo") {
+        if (action === "recovery-plan") {
+          setRecoveryPlan({
+            recommendedAction: recoveryCase.nextAction,
+            evidenceChecklist: outstandingRequirements.length
+              ? outstandingRequirements.map((item) => ({ item, status: "missing", responsibleParty: item.includes("authority") ? "authority" : "deducting_customer" }))
+              : [{ item: "Review the matched evidence position", status: "pending", responsibleParty: "internal" }],
+            suggestedPriority: recoveryCase.age >= 90 || recoveryCase.amount >= 500_000 ? "high" : "standard",
+            priorityReasons: [`Case age is ${formatDays(recoveryCase.age)}`, `Expected WHT is ${formatNaira(recoveryCase.amount)}`],
+            suggestedDueInDays: recoveryCase.age >= 90 ? 5 : 10,
+            escalationInDays: recoveryCase.age >= 90 ? 10 : 20,
+            uncertainty: "Synthetic guidance only. No live record, assignment or status was changed.",
+          });
+        }
+        if (action === "communication-draft") {
+          setGeneratedDraft({
+            subject: `WHT evidence required for ${recoveryCase.invoice}`,
+            body: `Hello ${recoveryCase.customer} team,\n\nOur records show a WHT deduction of ${formatNaira(recoveryCase.amount)} linked to invoice ${recoveryCase.invoice}. ${recoveryCase.nextAction}. Please share the supporting receipt or correction confirmation so we can complete our reconciliation.\n\nRegards,\nWHT Recovery Team`,
+            disclaimer: "Synthetic draft. Reviewer approval is required before external use.",
+            sourceLabels: ["Case identity", "Financial position", "Connected evidence"],
+          });
+        }
+        if (action === "copilot") {
+          const missing = outstandingRequirements.length ? outstandingRequirements.join(", ") : "no mandatory evidence items";
+          const asksWhyBlocked = /why|block|recogn/i.test(copilotQuestion);
+          const asksMissing = /missing|evidence|outstanding/i.test(copilotQuestion);
+          setCopilotAnswer({
+            answer: asksMissing
+              ? `This demo case currently requires ${missing}. The answer comes from the displayed evidence chain and deterministic field comparison.`
+              : asksWhyBlocked
+                ? canRecognise ? "Recognition is available because the displayed mandatory evidence and deterministic checks have passed." : `Recognition is blocked because the case still requires ${missing}.`
+                : `${recoveryCase.customer} has ${formatNaira(recoveryCase.amount)} expected WHT in ${stageLabels[recoveryCase.stage].toLowerCase()} status. The current required action is: ${recoveryCase.nextAction}.`,
+            suggestedAction: recoveryCase.nextAction,
+            sourceLabels: ["case.identity", "case.financialPosition", "case.evidence", "case.deterministicChecks"],
+            limitations: ["This is a synthetic demo response", "No live records or external authority data were queried"],
+          });
+        }
+        onNotify(`${action.replaceAll("-", " ")} generated from synthetic demo records.`);
+        return;
+      }
       const response = await fetch("/api/assistant", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

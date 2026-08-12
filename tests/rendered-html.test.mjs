@@ -157,3 +157,14 @@ test("demo and live records have an explicit non-merging boundary", async () => 
   assert.match(auth, /oai-authenticated-user-id/);
   assert.match(auth, /localDevelopment/);
 });
+
+test("demo AI interactions stay local and never require a production session", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+
+  assert.match(page, /<AiActivityView key=\{appMode\} mode=\{appMode\}/);
+  assert.match(page, /function demoAiActivityJobs/);
+  assert.match(page, /if \(mode === "demo"\) \{\s*setJobs\(demoAiActivityJobs\(\)\)/);
+  assert.match(page, /<PortfolioBriefingPanel mode=\{mode\}/);
+  assert.match(page, /Synthetic guidance only/);
+  assert.match(page, /No live records or external authority data were queried/);
+});

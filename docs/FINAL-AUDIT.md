@@ -21,7 +21,7 @@ Pass. The product reads as a purpose-built tax recovery control workspace rather
 
 ## Verified behavior
 
-- Production build succeeds and all 18 automated workflow/render tests pass.
+- Production build succeeds and all 19 automated workflow/render tests pass, including the Demo/Live AI isolation boundary.
 - Settings API is authenticated, workspace-scoped, role-aware, same-origin protected and no-store.
 - Workspace, client, evidence governance and membership role changes write immutable audit events in the same D1 batch as their mutation.
 - The live Evidence governance save path completed successfully and returned an actionable confirmation.
