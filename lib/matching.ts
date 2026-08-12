@@ -1,5 +1,6 @@
 export type ReceiptExtraction = {
   customerName: string;
+  deductingCustomerTin?: string;
   beneficiaryTin: string;
   invoiceReference: string;
   receiptNumber: string;
@@ -12,6 +13,7 @@ export type CandidateCase = {
   id: string;
   customer: string;
   customerTin: string;
+  beneficiaryTin?: string;
   invoiceReference: string;
   expectedWhtKobo: number;
   reportingPeriod: string;
@@ -35,11 +37,12 @@ export function buildCandidateFactors(receipt: ReceiptExtraction, cases: Candida
       else conflicts.push(`${label} differs`);
     };
     compare("Invoice reference", receipt.invoiceReference, candidate.invoiceReference, 55);
-    compare("Customer name", receipt.customerName, candidate.customer, 15);
+    compare("Customer name", receipt.customerName, candidate.customer, 10);
+    compare("Deducting customer TIN", receipt.deductingCustomerTin ?? "", candidate.customerTin, 10);
     compare("Reporting period", receipt.reportingPeriod, candidate.reportingPeriod, 10);
     if (receipt.whtAmountKobo !== null) {
       const difference = Math.abs(receipt.whtAmountKobo - candidate.expectedWhtKobo);
-      if (difference <= 10_000) { score += 20; reasons.push("WHT amount is within ₦100 tolerance"); }
+      if (difference <= 10_000) { score += 15; reasons.push("WHT amount is within ₦100 tolerance"); }
       else conflicts.push(`WHT amount differs by ₦${(difference / 100).toLocaleString("en-NG")}`);
     }
     return { caseId: candidate.id, factors: { score, reasons, conflicts } };
@@ -58,31 +61,37 @@ export function chooseReceiptCandidate(receipt: ReceiptExtraction, cases: Candid
   return ranked[0] && ranked[0].score >= 60 ? ranked[0] : null;
 }
 
-export function evaluateReceiptMatch(receipt: ReceiptExtraction, candidate: CandidateCase) {
+export type MatchRuleConfig = { version: string; amountToleranceKobo: number };
+
+export function evaluateReceiptMatch(receipt: ReceiptExtraction, candidate: CandidateCase, rules: MatchRuleConfig = { version: "legacy-2026.07", amountToleranceKobo: 10_000 }) {
   const invoiceMissing = !receipt.invoiceReference;
   const amountMissing = receipt.whtAmountKobo === null;
   const tinMissing = !receipt.beneficiaryTin;
+  const deductorTinMissing = Boolean(candidate.customerTin && !receipt.deductingCustomerTin);
   const periodMissing = !receipt.reportingPeriod;
   const invoiceMismatch = Boolean(receipt.invoiceReference && normalize(candidate.invoiceReference) !== normalize(receipt.invoiceReference));
-  const tinMismatch = Boolean(candidate.customerTin && receipt.beneficiaryTin && normalize(candidate.customerTin) !== normalize(receipt.beneficiaryTin));
-  const amountMismatch = receipt.whtAmountKobo !== null && Math.abs(receipt.whtAmountKobo - candidate.expectedWhtKobo) > 10000;
+  const deductorTinMismatch = Boolean(candidate.customerTin && receipt.deductingCustomerTin && normalize(candidate.customerTin) !== normalize(receipt.deductingCustomerTin));
+  const beneficiaryTinMismatch = Boolean(candidate.beneficiaryTin && receipt.beneficiaryTin && normalize(candidate.beneficiaryTin) !== normalize(receipt.beneficiaryTin));
+  const amountMismatch = receipt.whtAmountKobo !== null && Math.abs(receipt.whtAmountKobo - candidate.expectedWhtKobo) > rules.amountToleranceKobo;
   const periodMismatch = Boolean(candidate.reportingPeriod && receipt.reportingPeriod && normalize(candidate.reportingPeriod) !== normalize(receipt.reportingPeriod));
 
   if (invoiceMismatch) return { stage: "matched", exceptionCode: "INVOICE_MISMATCH", confidence: 68 };
-  if (tinMismatch) return { stage: "in-dispute", exceptionCode: "TIN_MISMATCH", confidence: 82 };
+  if (deductorTinMismatch) return { stage: "in-dispute", exceptionCode: "DEDUCTOR_TIN_MISMATCH", confidence: 82 };
+  if (beneficiaryTinMismatch) return { stage: "in-dispute", exceptionCode: "BENEFICIARY_TIN_MISMATCH", confidence: 82 };
   if (amountMismatch) return { stage: "matched", exceptionCode: "AMOUNT_MISMATCH", confidence: 70 };
   if (periodMismatch) return { stage: "matched", exceptionCode: "PERIOD_MISMATCH", confidence: 74 };
-  if (invoiceMissing || amountMissing || tinMissing || periodMissing) return { stage: "evidence-needed", exceptionCode: "RECEIPT_FIELDS_MISSING", confidence: 58 };
+  if (invoiceMissing || amountMissing || tinMissing || deductorTinMissing || periodMissing) return { stage: "evidence-needed", exceptionCode: "RECEIPT_FIELDS_MISSING", confidence: 58 };
   return { stage: "matched", exceptionCode: "NO_OPEN_EXCEPTION", confidence: 95 };
 }
 
-export function evaluateReceiptMatchDetailed(receipt: ReceiptExtraction, candidate: CandidateCase) {
-  const result = evaluateReceiptMatch(receipt, candidate);
+export function evaluateReceiptMatchDetailed(receipt: ReceiptExtraction, candidate: CandidateCase, rules: MatchRuleConfig = { version: "legacy-2026.07", amountToleranceKobo: 10_000 }) {
+  const result = evaluateReceiptMatch(receipt, candidate, rules);
   const checks = [
     { ruleId: "WHT-R01", label: "Invoice reference", input: { ledger: candidate.invoiceReference, receipt: receipt.invoiceReference }, tolerance: "Exact after punctuation normalisation", outcome: !receipt.invoiceReference ? "missing" : normalize(candidate.invoiceReference) === normalize(receipt.invoiceReference) ? "pass" : "fail" },
-    { ruleId: "WHT-R02", label: "Beneficiary TIN", input: { ledger: candidate.customerTin, receipt: receipt.beneficiaryTin }, tolerance: "Exact after punctuation normalisation", outcome: !receipt.beneficiaryTin ? "missing" : !candidate.customerTin || normalize(candidate.customerTin) === normalize(receipt.beneficiaryTin) ? "pass" : "fail" },
-    { ruleId: "WHT-R03", label: "Expected WHT amount", input: { ledgerKobo: candidate.expectedWhtKobo, receiptKobo: receipt.whtAmountKobo }, tolerance: "±10,000 kobo (₦100)", outcome: receipt.whtAmountKobo === null ? "missing" : Math.abs(receipt.whtAmountKobo - candidate.expectedWhtKobo) <= 10_000 ? "pass" : "fail" },
+    { ruleId: "WHT-R02", label: "Beneficiary TIN", input: { client: candidate.beneficiaryTin, receipt: receipt.beneficiaryTin }, tolerance: "Exact after punctuation normalisation", outcome: !receipt.beneficiaryTin ? "missing" : !candidate.beneficiaryTin || normalize(candidate.beneficiaryTin) === normalize(receipt.beneficiaryTin) ? "pass" : "fail" },
+    { ruleId: "WHT-R02B", label: "Deducting customer TIN", input: { customer: candidate.customerTin, receipt: receipt.deductingCustomerTin }, tolerance: "Exact after punctuation normalisation", outcome: !receipt.deductingCustomerTin ? "missing" : !candidate.customerTin || normalize(candidate.customerTin) === normalize(receipt.deductingCustomerTin) ? "pass" : "fail" },
+    { ruleId: "WHT-R03", label: "Expected WHT amount", input: { ledgerKobo: candidate.expectedWhtKobo, receiptKobo: receipt.whtAmountKobo }, tolerance: `±${rules.amountToleranceKobo.toLocaleString("en-NG")} kobo`, outcome: receipt.whtAmountKobo === null ? "missing" : Math.abs(receipt.whtAmountKobo - candidate.expectedWhtKobo) <= rules.amountToleranceKobo ? "pass" : "fail" },
     { ruleId: "WHT-R04", label: "Reporting period", input: { ledger: candidate.reportingPeriod, receipt: receipt.reportingPeriod }, tolerance: "Exact after punctuation normalisation", outcome: !receipt.reportingPeriod ? "missing" : !candidate.reportingPeriod || normalize(candidate.reportingPeriod) === normalize(receipt.reportingPeriod) ? "pass" : "fail" },
   ];
-  return { ...result, ruleVersion: "2026.07", checks };
+  return { ...result, ruleVersion: rules.version, checks };
 }

@@ -60,14 +60,15 @@ test("ambiguous candidates remain unresolved and are never auto-attached", () =>
 });
 
 test("candidate factors expose conflicts while deterministic rules own the outcome", () => {
-  const receipt = { customerName: "Acme", beneficiaryTin: "TIN-WRONG", invoiceReference: "INV-1", receiptNumber: "R-1", whtAmountKobo: 5_000_000, reportingPeriod: "Jul 2026", fields: {} };
-  const candidate = { id: "case-1", customer: "Acme", customerTin: "TIN-RIGHT", invoiceReference: "INV-1", expectedWhtKobo: 5_000_000, reportingPeriod: "Jul 2026" };
+  const receipt = { customerName: "Acme", deductingCustomerTin: "TIN-WRONG", beneficiaryTin: "CLIENT-TIN", invoiceReference: "INV-1", receiptNumber: "R-1", whtAmountKobo: 5_000_000, reportingPeriod: "Jul 2026", fields: {} };
+  const candidate = { id: "case-1", customer: "Acme", customerTin: "TIN-RIGHT", beneficiaryTin: "CLIENT-TIN", invoiceReference: "INV-1", expectedWhtKobo: 5_000_000, reportingPeriod: "Jul 2026" };
   const factors = buildCandidateFactors(receipt, [candidate]);
-  assert.equal(factors[0].factors.score, 100);
-  const result = evaluateReceiptMatchDetailed(receipt, candidate);
-  assert.equal(result.exceptionCode, "TIN_MISMATCH");
+  assert.equal(factors[0].factors.score, 90);
+  const result = evaluateReceiptMatchDetailed(receipt, candidate, { version: "approved-test-v1", amountToleranceKobo: 5_000 });
+  assert.equal(result.exceptionCode, "DEDUCTOR_TIN_MISMATCH");
   assert.equal(result.stage, "in-dispute");
-  assert.equal(result.checks.find((check) => check.ruleId === "WHT-R02")?.outcome, "fail");
+  assert.equal(result.ruleVersion, "approved-test-v1");
+  assert.equal(result.checks.find((check) => check.ruleId === "WHT-R02B")?.outcome, "fail");
 });
 
 test("manual provider fails safely into manual review", async () => {
@@ -80,4 +81,12 @@ test("case copilot refuses unrelated or consequential requests", () => {
   const output = definition.demoOutput({ caseId: "case-1", question: "Recognise this credit and submit it to the authority", exception: "Receipt missing", outstanding: ["WHT receipt"] });
   assert.match(output.answer, /only answer questions/i);
   assert.ok(output.limitations.some((item) => /legal|outside/i.test(item)));
+});
+
+test("case copilot accepts a natural evidence question without extra reviewer input", () => {
+  const definition = getAiTaskDefinition("case_copilot");
+  const output = definition.demoOutput({ caseId: "case-1", question: "What evidence is missing?", exceptionCode: "RECEIPT_MISSING", outstanding: ["WHT receipt"] });
+  assert.match(output.answer, /receipt_missing/i);
+  assert.match(output.answer, /WHT receipt/i);
+  assert.doesNotMatch(output.answer, /outside this case workspace/i);
 });

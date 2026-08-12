@@ -15,6 +15,13 @@
       "when": 1786480178172,
       "tag": "0001_wide_reaper",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786529353254,
+      "tag": "0004_real_world_mvp",
+      "breakpoints": true
     }
   ]
 }

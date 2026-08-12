@@ -24,6 +24,7 @@ export async function runAiTask<TOutput>({
   caseId,
   documentId,
   workspaceId = "pilot-workspace",
+  requestedByUserId,
   providerMode,
 }: {
   type: AiTaskType;
@@ -31,6 +32,7 @@ export async function runAiTask<TOutput>({
   caseId?: string;
   documentId?: string;
   workspaceId?: string;
+  requestedByUserId?: string;
   providerMode?: string;
 }): Promise<AiTaskResult<TOutput>> {
   await ensureSchema();
@@ -41,7 +43,7 @@ export async function runAiTask<TOutput>({
   const inputHash = await hashStructuredInput(input);
   const createdAt = new Date().toISOString();
   const db = getDb();
-  await db.insert(aiJobs).values({ id: jobId, workspaceId, caseId, documentId, taskType: type, status: "processing", provider: provider.name, model: provider.model, promptVersion: definition.promptVersion, inputHash, validationOutcome: "pending", createdAt });
+  await db.insert(aiJobs).values({ id: jobId, workspaceId, caseId, documentId, taskType: type, status: "processing", provider: provider.name, model: provider.model, promptVersion: definition.promptVersion, inputHash, validationOutcome: "pending", requestedByUserId, idempotencyKey: `${workspaceId}:${type}:${inputHash}`, attemptCount: 1, createdAt });
   const started = Date.now();
   try {
     const raw = await provider.generateStructured(definition, input);

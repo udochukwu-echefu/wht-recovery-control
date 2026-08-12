@@ -1,53 +1,95 @@
-# WHT Recovery Control Workspace
+# WHT Recovery Control
 
-A practitioner-supervised presentation pilot for detecting, explaining, and resolving Nigerian withholding-tax receivable exceptions.
+An evidence-led Nigerian withholding-tax recovery workspace for practitioner-supervised case detection, receipt review, authority reconciliation, recognition and utilisation control.
 
-The pilot includes a synthetic portfolio plus a real vertical slice: staged ledger mapping, durable source-file storage, document classification, source-grounded receipt extraction, reviewer-confirmed candidate matching, deterministic controls, recovery planning, grounded communication drafts, a constrained case copilot, evidence reports, and append-only audit history. It does not provide tax advice, send messages, recognise or utilise credits autonomously, or submit information to any tax authority.
+The application has two explicit data modes:
 
-## Run locally
+- **Demo** contains synthetic walkthrough records. Browser changes are temporary and never claim to be audited.
+- **Live** contains only authenticated, workspace-scoped D1 records. Demo and live cases are never merged.
+
+## Local setup
+
+Requirements: Node.js 22.13+ and a Cloudflare account only when using remote resources.
 
 ```bash
 npm install
+npm run db:migrate:local
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). Local D1 data is stored under `.wrangler/state`.
+Open [http://localhost:3000](http://localhost:3000), switch to **Live**, then create and approve a rule set under **Rules & controls** before importing a ledger. Local D1 data is kept under `.wrangler/state`.
 
-## AI provider modes and demo fallback
+If upgrading a database created by the pre-migration runtime bootstrap, verify the old tables first and record migrations `0000`–`0003` in `d1_migrations`; do not delete the database merely to make migration tracking pass. Migration `0004_real_world_mvp.sql` is additive.
 
-`AI_PROVIDER=auto` uses the managed DeepSeek provider when `DEEPSEEK_API_KEY` is present and otherwise selects the deterministic presentation fixtures. Use `AI_PROVIDER=demo` for a reliable offline rehearsal, `AI_PROVIDER=manual` to exercise human-only fallback paths, or `AI_PROVIDER=deepseek` to require the managed provider. Provider/model details are confined to AI activity and audit details.
+## Configuration
 
-The pilot does not include production OCR. Originals up to 1 MB are retained in D1; when no machine-readable text is available the workflow clearly enters manual-entry/OCR fallback instead of failing silently.
+Copy `.env.example` to `.env` for local development. Secrets stay server-side.
 
-AI is deliberately assistive:
+```dotenv
+DEEPSEEK_API_KEY=your-secret
+DEEPSEEK_MODEL=deepseek-v4-flash
+AI_PROVIDER=auto
+```
 
-1. AI tasks return strict, allowlisted structures with confidence, exact source snippets, page references, prompt version and source references.
-2. Application logic calculates amounts, detects duplicates, computes candidate factors and runs rule set `2026.07` comparisons.
-3. A reviewer confirms mappings, candidate links, receipt corrections, plans, communication use and consequential case decisions.
-4. AI cannot send messages, alter amounts or tax rules, recognise/utilise/close/write off a case, or submit to an authority.
+`AI_PROVIDER=auto` uses DeepSeek when configured and otherwise uses deterministic fixtures. `demo` forces fixtures; `manual` forces the reviewed manual fallback; `deepseek` requires the managed provider. Provider/model details appear only in AI activity and audit details.
 
-## Operator journey
+Production identity is derived from trusted `oai-authenticated-user-*` proxy headers. Production requests without an identity fail closed. Localhost receives an isolated local-development account so the live workflow can be tested without an identity proxy.
 
-1. Open **Data intake**, upload a ledger CSV, inspect the preview and confirm every proposed mapping.
-2. Run deterministic validation. Candidate cases are created only after the reviewer selects **Create candidate cases**.
-3. Attach or paste receipt text. Review classification, duplicate position, all 12 extracted fields and their provenance.
-4. Select a ranked candidate and add the required reviewer note. Deterministic matching runs only after this confirmation.
-5. Open the case, review/correct permitted extraction fields with an audit note, and rerun the controls.
-6. Review a recovery plan, grounded evidence-request draft or case-copilot answer. These suggestions do not change the case.
-7. Use **AI activity** to inspect task status, source references, confidence, latency, validation outcome and provider governance details.
+## Controlled workflow
 
-Sample inputs are in `tests/fixtures/`.
+1. Create and practitioner-approve an effective-dated rule set.
+2. Upload a ledger CSV; confirm every mapping and pass deterministic validation.
+3. Import canonical customers, invoices, payments and allocations. Each payment gap starts in applicability review—not as an assumed tax receivable.
+4. Confirm WHT applicability with category, rate/amount and a required note, or record exemption/non-applicability.
+5. Upload a receipt original. D1 storage enforces workspace quota, per-file size, SHA-256 duplicate detection, MIME/extension/signature checks and retention metadata.
+6. Review source-grounded extraction fields and provenance. Permitted corrections require a note; the audit event and match execution are written before state changes.
+7. Confirm a candidate and run deterministic receipt matching under the active approved rule version.
+8. Import/review authority records and reconcile beneficiary TIN, deductor TIN, period, amount tolerance and credit status.
+9. Recognise only after applicability, extraction review, receipt matching and authority reconciliation all pass.
+10. Record utilisation, write-off or non-recoverable outcomes through role-controlled operations. Utilisation requires evidence.
+11. Export an immutable, hash-addressed JSON audit pack or query portfolio/ageing/outcome reports.
 
-## Ledger mapping contract
+## Data and security model
 
-The reviewer must map `customer_name`, `invoice_reference`, `invoice_gross_amount`, `payment_net_amount`, `payment_date`, and `reporting_period`. `expected_wht_amount`, when supplied, must equal the deterministic invoice-gross/payment-net gap. Invalid/negative amounts, net values above gross, duplicates and existing cases block import.
+- Workspaces, users, memberships and roles (`admin`, `practitioner`, `reviewer`, `analyst`, `read_only`)
+- Workspace and client scope on operational rows and every API query
+- Server-derived actors for audit events; browser-supplied actor/role/workspace values are ignored
+- Append-only audit table protected by update/delete triggers
+- Same-origin mutation checks and D1-backed rate limits on intake and assistant routes
+- Authenticated document download; administrator-only soft deletion
+- A live Settings workspace for client identity, evidence limits, retention, member roles, AI availability and appearance; every material settings change is role-controlled and audited
+- D1 BLOB adapter (`put`, `get`, metadata/hash verification, soft delete) with 1 MB default file and 25 MB default workspace quotas
+- Security headers and no-store API responses at the Worker boundary
+- No autonomous tax conclusion, authority submission, outbound message, recognition, utilisation, closure or write-off
 
-## Product boundaries
+## AI and OCR boundaries
 
-- Presentation pilot only; not production ready
-- Use synthetic or appropriately redacted data
-- Deterministic matching before AI assistance
-- Human approval for consequential actions
-- Tax rules and administrative procedures are versioned configuration
-- Pilot originals, structured cases, provenance, and audit events in D1
-- Authentication/tenant isolation, production OCR, background orchestration, authority integrations, delivery integrations, production monitoring and formal Nigerian tax/legal validation remain outstanding
+AI inputs are assembled from workspace-scoped server records. Browser case narratives and amounts are not accepted as ground truth. AI output remains allowlisted, source-labelled and advisory; deterministic rules own calculated outcomes.
+
+The OCR abstraction currently supports embedded/reviewer-supplied text and an explicit manual-review fallback. A production image/PDF OCR provider is not configured. The original document remains retained and the UI reports that manual entry is required.
+
+AI jobs persist status, prompt version, input hash, attempts, retry/lease metadata, validation result, latency and reviewer corrections. Calls currently execute synchronously in the request; a production queue/consumer for crash-safe deferred execution remains required before high-volume use.
+
+## Commands
+
+```bash
+npm run lint
+npm run typecheck
+npm test
+npm run build
+npm run db:migrate:local
+npm run db:migrate:remote
+```
+
+Do not apply remote migrations or deploy without reviewing the target account, approved rules, identity-proxy configuration, retention policy and a database backup/export.
+
+## Current limitations
+
+- No direct tax-authority integration or filing submission
+- No production OCR provider
+- No outbound email/SMS delivery; drafts are reviewed and external correspondence is recorded manually
+- No background queue consumer yet; persisted AI jobs are request-executed
+- Audit packs are canonical JSON, not signed PDF bundles
+- Tax rates and procedures require Nigerian practitioner validation before approval
+
+Sample inputs are in `tests/fixtures/`. The practitioner brief used to shape the control boundaries is external reference material and is not bundled into the application.

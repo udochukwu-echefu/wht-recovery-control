@@ -64,7 +64,7 @@ test("reviewer corrections are audited before recognition", async () => {
   const [page, reviewRoute, schemaEnsure, matching] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/review/route.ts", import.meta.url), "utf8"),
-    readFile(new URL("../db/ensure.ts", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0002_audit_immutability.sql", import.meta.url), "utf8"),
     readFile(new URL("../lib/matching.ts", import.meta.url), "utf8"),
   ]);
 
@@ -77,4 +77,83 @@ test("reviewer corrections are audited before recognition", async () => {
   assert.match(schemaEnsure, /audit_events_no_update/);
   assert.match(schemaEnsure, /audit_events_no_delete/);
   assert.match(matching, /INVOICE_MISMATCH/);
+});
+
+test("theme choice persists and application dropdowns use the custom listbox", async () => {
+  const [page, layout, styles] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(layout, /wht-theme/);
+  assert.match(layout, /prefers-color-scheme: light/);
+  assert.match(page, /role="combobox"/);
+  assert.match(page, /role="listbox"/);
+  assert.match(page, /Toggle light or dark mode/);
+  assert.doesNotMatch(page, /<select\b/i);
+  assert.match(styles, /:root\[data-theme="light"\]/);
+  assert.match(styles, /\.custom-select-menu/);
+});
+
+test("settings are workspace-scoped, role-aware and auditable", async () => {
+  const [page, route, styles] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/settings/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(page, /Workspace and client/);
+  assert.match(page, /Evidence governance/);
+  assert.match(page, /Access and roles/);
+  assert.match(page, /AI and security/);
+  assert.match(page, /Open live settings/);
+  assert.doesNotMatch(page, /<select\b/i);
+  assert.match(route, /requireContext\(request/);
+  assert.match(route, /context\.workspace\.id/);
+  assert.match(route, /WORKSPACE_SETTINGS_CHANGED/);
+  assert.match(route, /EVIDENCE_GOVERNANCE_CHANGED/);
+  assert.match(route, /MEMBER_ROLE_CHANGED/);
+  assert.match(route, /You cannot remove your own administrator access/);
+  assert.match(styles, /\.settings-layout/);
+  assert.match(styles, /\.settings-member-table/);
+});
+
+test("case copilot sends the reviewer question through the secured server-grounded route", async () => {
+  const [page, assistantRoute] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/assistant/route.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(page, /question: action === "copilot" \? copilotQuestion\.trim\(\) : undefined/);
+  assert.match(page, /What evidence is missing\?/);
+  assert.match(page, /Why is recognition blocked\?/);
+  assert.match(page, /What should I do next\?/);
+  assert.match(page, /aria-label="Example case questions"/);
+  assert.match(page, /aria-label="Case copilot answer"/);
+  assert.match(page, /Grounded in connected case records/);
+  assert.match(page, /Recommended next step/);
+  assert.match(page, /Evidence used/);
+  assert.match(page, /Scope and limitations/);
+  assert.doesNotMatch(page, /facts: action === "copilot"/);
+  assert.match(assistantRoute, /task === "case_copilot" && !question/);
+  assert.match(assistantRoute, /latestDeterministicMatch/);
+  assert.match(assistantRoute, /authorityReconciliation/);
+});
+
+test("demo and live records have an explicit non-merging boundary", async () => {
+  const [page, casesRoute, assistantRoute, auth] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/cases/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/assistant/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/auth.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(page, /synthetic records are isolated from the live workspace/i);
+  assert.match(page, /setCases\(persisted\)/);
+  assert.doesNotMatch(page, /\[\.\.\.persisted, \.\.\.current\.filter/);
+  assert.doesNotMatch(page, /storedStage === "recognised" \|\| storedStage === "closed"/);
+  assert.match(casesRoute, /recoveryCases\.workspaceId/);
+  assert.match(assistantRoute, /sourceGroundedOnServer: true/);
+  assert.doesNotMatch(assistantRoute, /body\.facts/);
+  assert.match(auth, /oai-authenticated-user-id/);
+  assert.match(auth, /localDevelopment/);
 });

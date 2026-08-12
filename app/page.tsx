@@ -1,3 +1,5 @@
+/* CustomSelect exposes an accessible button name while its wrapping label supplies visible context. */
+/* eslint-disable jsx-a11y/label-has-associated-control */
 "use client";
 
 import {
@@ -5,9 +7,12 @@ import {
   ArrowLeft,
   ArrowUpRight,
   BadgeCheck,
+  Bot,
   BookOpenCheck,
+  Building2,
   Check,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   CircleAlert,
   Clock3,
@@ -17,6 +22,7 @@ import {
   FileSearch2,
   FileText,
   FolderClock,
+  HardDrive,
   HelpCircle,
   History,
   LayoutDashboard,
@@ -24,6 +30,7 @@ import {
   LockKeyhole,
   Mail,
   Menu,
+  Moon,
   Paperclip,
   PencilLine,
   Quote,
@@ -33,10 +40,12 @@ import {
   Settings2,
   ShieldCheck,
   SlidersHorizontal,
+  Sun,
   Upload,
+  Users,
   X,
 } from "lucide-react";
-import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
 type CaseStage =
   | "detected"
@@ -44,7 +53,9 @@ type CaseStage =
   | "matched"
   | "in-dispute"
   | "recognised"
-  | "closed";
+  | "closed"
+  | "non-recoverable"
+  | "written-off";
 
 type EvidenceState = "verified" | "warning" | "missing" | "pending";
 
@@ -80,10 +91,12 @@ type RecoveryCase = {
   sourceDocumentId?: string | null;
 };
 
-type View = "overview" | "cases" | "imports" | "rules" | "ai-activity";
+type View = "overview" | "cases" | "imports" | "rules" | "ai-activity" | "settings";
 type CaseFilter = CaseStage | "all" | "open" | "needs-intervention";
 
 type AiStatus = { configured: boolean; model: string; provider?: string; release?: string; demoFallback?: boolean };
+type AppMode = "demo" | "live";
+type SessionInfo = { user: { displayName: string; email: string }; workspace: { id: string; name: string; role: string }; clientId: string; localDevelopment: boolean };
 
 type LedgerTargetField =
   | "customer_name" | "customer_tin" | "invoice_reference" | "invoice_gross_amount"
@@ -156,6 +169,10 @@ type PersistentCase = {
   confidence: number;
   sourceDocumentId: string | null;
   updatedAt: string;
+  nextAction?: string | null;
+  assignedOwnerId?: string | null;
+  authorityConnected?: number | boolean;
+  clientTin?: string;
 };
 
 type ReviewField = {
@@ -186,6 +203,7 @@ type ReviewData = {
 };
 
 type ReviewOutcome = { stage: CaseStage; exceptionCode: string; confidence: number };
+type EvidenceSummary = { executiveSummary: string; exceptionNarrative: string; correspondenceSummary: string; resolutionHistory: string; outstandingItemsSummary: string; sourceLabels: string[] };
 
 const stageLabels: Record<CaseStage, string> = {
   detected: "Detected",
@@ -194,6 +212,8 @@ const stageLabels: Record<CaseStage, string> = {
   "in-dispute": "In dispute",
   recognised: "Recognised",
   closed: "Closed",
+  "non-recoverable": "Non-recoverable",
+  "written-off": "Written off",
 };
 
 const ledgerFieldOptions: Array<{ value: LedgerTargetField; label: string }> = [
@@ -375,6 +395,11 @@ const initialCases: RecoveryCase[] = [
   },
 ];
 
+const initialImportBatches = [
+  { name: "July WHT ledger.csv", rows: 184, status: "Validated", time: "Today, 08:32" },
+  { name: "Receipt bundle 07.pdf", rows: 27, status: "Reviewed", time: "Yesterday, 15:11" },
+];
+
 const navItems = [
   { id: "overview" as const, label: "Overview", icon: LayoutDashboard },
   { id: "cases" as const, label: "Recovery cases", icon: FolderClock },
@@ -402,6 +427,13 @@ const exceptionLabels: Record<string, string> = {
   PERIOD_MISMATCH: "Reporting period differs",
   INVOICE_MISMATCH: "Invoice reference differs",
   AUTHORITY_RECORD_MISSING: "Authority record not connected",
+  APPLICABILITY_REVIEW_REQUIRED: "Applicability review required",
+  APPLICABILITY_UNCERTAIN: "Applicability uncertain",
+  WHT_NOT_APPLICABLE: "WHT not applicable",
+  WHT_EXEMPT: "WHT exempt",
+  AUTHORITY_MISMATCH: "Authority record differs",
+  DEDUCTOR_TIN_MISMATCH: "Deducting customer TIN differs",
+  BENEFICIARY_TIN_MISMATCH: "Beneficiary TIN differs",
   NO_OPEN_EXCEPTION: "No open exception",
 };
 
@@ -410,18 +442,11 @@ function persistentCaseToView(item: PersistentCase): RecoveryCase {
   const amount = item.expectedWhtKobo / 100;
   const receiptAmount = item.receiptAmountKobo === null ? null : item.receiptAmountKobo / 100;
   const hasReceipt = Boolean(item.receiptNumber && receiptAmount !== null);
-  const stage: CaseStage = !hasReceipt
-    ? "evidence-needed"
-    : storedStage === "recognised" || storedStage === "closed"
-      ? "matched"
-      : storedStage;
-  const exceptionCode = !hasReceipt
-    ? "RECEIPT_MISSING"
-    : storedStage === "recognised" || storedStage === "closed"
-      ? "AUTHORITY_RECORD_MISSING"
-      : item.exceptionCode;
+  const stage: CaseStage = storedStage;
+  const exceptionCode = item.exceptionCode;
   const amountMatches = receiptAmount !== null && Math.abs(receiptAmount - amount) <= 100;
-  const tinMatches = Boolean(item.customerTin && item.receiptBeneficiaryTin && item.customerTin.replace(/\W/g, "") === item.receiptBeneficiaryTin.replace(/\W/g, ""));
+  const tinMatches = Boolean(item.clientTin && item.receiptBeneficiaryTin && item.clientTin.replace(/\W/g, "") === item.receiptBeneficiaryTin.replace(/\W/g, ""));
+  const authorityConnected = Boolean(item.authorityConnected);
   return {
     id: item.id,
     customer: item.customer,
@@ -430,20 +455,20 @@ function persistentCaseToView(item: PersistentCase): RecoveryCase {
     stage,
     exception: exceptionLabels[exceptionCode] ?? exceptionCode.replaceAll("_", " ").toLowerCase(),
     age: Math.max(0, Math.floor((Date.now() - new Date(item.updatedAt).getTime()) / 86_400_000)),
-    owner: "Unassigned",
+    owner: item.assignedOwnerId || "Unassigned",
     confidence: item.confidence,
     updated: new Date(item.updatedAt).toLocaleString("en-NG", { dateStyle: "medium", timeStyle: "short" }),
-    nextAction: !hasReceipt ? "Attach WHT receipt" : stage === "matched" ? "Connect and verify the authority record" : stage === "in-dispute" ? "Request a corrected receipt from the deducting customer" : "Review the evidence exception",
+    nextAction: item.nextAction || (!hasReceipt ? "Attach WHT receipt" : stage === "matched" ? "Connect and verify the authority record" : stage === "in-dispute" ? "Request a corrected receipt from the deducting customer" : "Review the evidence exception"),
     narrative: hasReceipt ? "Receipt fields were extracted and compared with the ledger candidate. The authority record must be connected before recognition." : "The ledger payment gap created this candidate. A WHT receipt is required before matching can continue.",
     evidence: [
       { label: "Invoice", reference: item.invoiceReference, detail: formatNaira(item.invoiceGrossKobo / 100), state: "verified" },
       { label: "Payment", reference: "Imported ledger", detail: formatNaira(item.paymentNetKobo / 100), state: "verified" },
       { label: "WHT receipt", reference: item.receiptNumber || "Missing", detail: receiptAmount === null ? "Attachment required" : formatNaira(receiptAmount), state: hasReceipt ? (item.exceptionCode === "NO_OPEN_EXCEPTION" ? "verified" : "warning") : "missing" },
-      { label: "Authority record", reference: "Not connected", detail: "Required before recognition", state: "missing" },
+      { label: "Authority record", reference: authorityConnected ? "Verified authority allocation" : "Not connected", detail: authorityConnected ? "Deterministic reconciliation passed" : "Required before recognition", state: authorityConnected ? "verified" : "missing" },
     ],
     checks: [
       { label: "Invoice reference", bookValue: item.invoiceReference, evidenceValue: item.receiptNumber ? item.invoiceReference : "Not provided", result: item.receiptNumber ? "match" : "missing" },
-      { label: "Beneficiary TIN", bookValue: item.customerTin || "Not provided", evidenceValue: item.receiptBeneficiaryTin || "Not extracted", result: !item.receiptBeneficiaryTin ? "missing" : tinMatches ? "match" : "mismatch" },
+      { label: "Beneficiary TIN", bookValue: item.clientTin || "Entity TIN not configured", evidenceValue: item.receiptBeneficiaryTin || "Not extracted", result: !item.receiptBeneficiaryTin || !item.clientTin ? "missing" : tinMatches ? "match" : "mismatch" },
       { label: "WHT amount", bookValue: formatNaira(amount), evidenceValue: receiptAmount === null ? "Not extracted" : formatNaira(receiptAmount), result: receiptAmount === null ? "missing" : amountMatches ? "match" : "mismatch" },
       { label: "Reporting period", bookValue: item.reportingPeriod || "Not provided", evidenceValue: item.reportingPeriod || "Not extracted", result: item.reportingPeriod ? "match" : "missing" },
     ],
@@ -463,9 +488,127 @@ function AppMark() {
   );
 }
 
+type SelectOption<T extends string> = { value: T; label: string };
+
+function CustomSelect<T extends string>({
+  value,
+  options,
+  onChange,
+  ariaLabel,
+  disabled = false,
+  className = "",
+}: {
+  value: T;
+  options: Array<SelectOption<T>>;
+  onChange: (value: T) => void;
+  ariaLabel: string;
+  disabled?: boolean;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(Math.max(0, options.findIndex((option) => option.value === value)));
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const listboxId = useId();
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
+  const selected = options[selectedIndex] ?? options[0];
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    window.addEventListener("pointerdown", closeOutside);
+    return () => window.removeEventListener("pointerdown", closeOutside);
+  }, [open]);
+
+  const choose = (index: number) => {
+    const option = options[index];
+    if (!option) return;
+    onChange(option.value);
+    setActiveIndex(index);
+    setOpen(false);
+    requestAnimationFrame(() => triggerRef.current?.focus());
+  };
+
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (disabled) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (!open) {
+        setOpen(true);
+        setActiveIndex(selectedIndex);
+        return;
+      }
+      setActiveIndex((current) => event.key === "ArrowDown" ? (current + 1) % options.length : (current - 1 + options.length) % options.length);
+    }
+    if ((event.key === "Enter" || event.key === " ") && open) {
+      event.preventDefault();
+      choose(activeIndex);
+    } else if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      setOpen(true);
+      setActiveIndex(selectedIndex);
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setOpen(false);
+    }
+    if (event.key === "Home" && open) { event.preventDefault(); setActiveIndex(0); }
+    if (event.key === "End" && open) { event.preventDefault(); setActiveIndex(options.length - 1); }
+  };
+
+  return (
+    <div className={`custom-select ${open ? "is-open" : ""} ${className}`} ref={rootRef}>
+      <button
+        type="button"
+        ref={triggerRef}
+        className="custom-select-trigger"
+        role="combobox"
+        aria-label={ariaLabel}
+        aria-expanded={open}
+        aria-controls={listboxId}
+        aria-haspopup="listbox"
+        aria-activedescendant={open ? `${listboxId}-${activeIndex}` : undefined}
+        disabled={disabled}
+        onClick={() => { setOpen((current) => !current); setActiveIndex(selectedIndex); }}
+        onKeyDown={onKeyDown}
+        onBlur={(event) => {
+          if (!rootRef.current?.contains(event.relatedTarget as Node | null)) setOpen(false);
+        }}
+      >
+        <span>{selected?.label ?? value}</span>
+        <ChevronDown size={15} aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="custom-select-menu" id={listboxId} role="listbox" aria-label={ariaLabel}>
+          {options.map((option, index) => (
+            <button
+              type="button"
+              tabIndex={-1}
+              id={`${listboxId}-${index}`}
+              role="option"
+              aria-selected={option.value === value}
+              className={index === activeIndex ? "active" : ""}
+              key={option.value}
+              onMouseEnter={() => setActiveIndex(index)}
+              onClick={() => choose(index)}
+            >
+              <span>{option.label}</span>
+              {option.value === value && <Check size={14} aria-hidden="true" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Home() {
   const [view, setView] = useState<View>("overview");
   const [cases, setCases] = useState(initialCases);
+  const [appMode, setAppMode] = useState<AppMode>("demo");
+  const [session, setSession] = useState<SessionInfo | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [globalQuery, setGlobalQuery] = useState("");
   const [caseQuery, setCaseQuery] = useState("");
@@ -483,18 +626,24 @@ export default function Home() {
   const [evidenceReviewNote, setEvidenceReviewNote] = useState("");
   const [isEvidenceConfirming, setIsEvidenceConfirming] = useState(false);
   const [aiStatus, setAiStatus] = useState<AiStatus>({ configured: false, model: "deepseek-v4-flash", provider: "DeepSeek", release: "V4 Flash 0731" });
-  const [importBatches, setImportBatches] = useState([
-    { name: "July WHT ledger.csv", rows: 184, status: "Validated", time: "Today, 08:32" },
-    { name: "Receipt bundle 07.pdf", rows: 27, status: "Reviewed", time: "Yesterday, 15:11" },
-  ]);
+  const [importBatches, setImportBatches] = useState(initialImportBatches);
   const ledgerInputRef = useRef<HTMLInputElement>(null);
   const evidenceInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let active = true;
     const loadPersistentData = async () => {
+      if (appMode === "demo") {
+        setCases(initialCases);
+        setImportBatches(initialImportBatches);
+        return;
+      }
       try {
-        const [caseResponse, healthResponse] = await Promise.all([fetch("/api/cases"), fetch("/api/health")]);
+        const [caseResponse, healthResponse, sessionResponse] = await Promise.all([fetch("/api/cases"), fetch("/api/health"), fetch("/api/session")]);
+        if (sessionResponse.ok) {
+          const loadedSession = await sessionResponse.json() as SessionInfo;
+          if (active) setSession(loadedSession);
+        }
         if (healthResponse.ok) {
           const health = await healthResponse.json() as { ai?: AiStatus };
           if (active && health.ai) setAiStatus(health.ai);
@@ -506,17 +655,34 @@ export default function Home() {
         };
         if (!active) return;
         const persisted = (data.cases ?? []).map(persistentCaseToView);
-        setCases((current) => [...persisted, ...current.filter((item) => !persisted.some((saved) => saved.id === item.id))]);
-        if (data.documents?.length) setImportBatches(data.documents.map((document) => ({ name: document.name, rows: document.rows, status: document.status.replaceAll("_", " "), time: new Date(document.createdAt).toLocaleString("en-NG", { dateStyle: "medium", timeStyle: "short" }) })));
+        setCases(persisted);
+        setImportBatches((data.documents ?? []).map((document) => ({ name: document.name, rows: document.rows, status: document.status.replaceAll("_", " "), time: new Date(document.createdAt).toLocaleString("en-NG", { dateStyle: "medium", timeStyle: "short" }) })));
       } catch {
-        // The seeded portfolio remains usable when local bindings have not started yet.
+        if (active) { setCases([]); setImportBatches([]); }
       }
     };
     void loadPersistentData();
     return () => { active = false; };
-  }, []);
+  }, [appMode]);
+
+  const switchMode = (mode: AppMode) => {
+    setAppMode(mode);
+    setSelectedId(null);
+    setLedgerWorkflow(null);
+    setEvidenceWorkflow(null);
+    window.localStorage.setItem("wht-app-mode", mode);
+  };
+
+  const toggleTheme = () => {
+    const current = document.documentElement.dataset.theme === "light" ? "light" : "dark";
+    const next = current === "dark" ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    window.localStorage.setItem("wht-theme", next);
+  };
 
   const selectedCase = cases.find((item) => item.id === selectedId) ?? null;
+  const profileName = appMode === "live" ? session?.user.displayName ?? "Local practitioner" : "Adanna Okafor";
+  const profileInitials = profileName.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase();
   const openCases = cases.filter((item) => item.stage !== "closed");
   const openAmount = openCases.reduce((total, item) => total + item.amount, 0);
   const recognisedAmount = cases
@@ -572,7 +738,11 @@ export default function Home() {
 
   const changeCaseStage = async (id: string, stage: "recognised" | "closed") => {
     const target = cases.find((item) => item.id === id);
-    if (target?.sourceDocumentId) {
+    if (appMode === "live") {
+      if (!target?.sourceDocumentId) {
+        notify("Live cases require persisted evidence before a review decision.");
+        return;
+      }
       try {
         const response = await fetch("/api/review", {
           method: "POST",
@@ -592,7 +762,7 @@ export default function Home() {
       updated: "Just now",
       nextAction: stage === "recognised" ? "Confirm utilisation against the next eligible liability" : "No further action",
     } : item));
-    notify(stage === "recognised" ? "Case marked as recognised and audited" : "Case closed with audit history preserved");
+    notify(appMode === "live" ? (stage === "recognised" ? "Case marked as recognised and audited" : "Case closed with audit history preserved") : "Demo preview updated locally; no live record or audit event was created.");
   };
 
   const applyReviewOutcome = (id: string, effectiveValues: Record<string, string>, outcome: ReviewOutcome) => {
@@ -631,6 +801,10 @@ export default function Home() {
   };
 
   const processUpload = async (file: File, documentText?: string) => {
+    if (appMode === "demo") {
+      notify("Switch to Live workspace to upload and persist evidence. Demo data is read-only.");
+      return;
+    }
     const batch = {
       name: file.name,
       rows: file.name.toLowerCase().endsWith(".pdf") ? 1 : 0,
@@ -668,7 +842,7 @@ export default function Home() {
       if (refresh.ok) {
         const data = await refresh.json() as { cases?: PersistentCase[] };
         const persisted = (data.cases ?? []).map(persistentCaseToView);
-        setCases((current) => [...persisted, ...current.filter((item) => !persisted.some((saved) => saved.id === item.id))]);
+        setCases(persisted);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Import failed";
@@ -692,7 +866,7 @@ export default function Home() {
       if (refresh.ok) {
         const data = await refresh.json() as { cases?: PersistentCase[] };
         const persisted = (data.cases ?? []).map(persistentCaseToView);
-        setCases((current) => [...persisted, ...current.filter((item) => !persisted.some((saved) => saved.id === item.id))]);
+        setCases(persisted);
       }
       notify(`Candidate confirmed. Deterministic result: ${result.deterministic?.exceptionCode?.replaceAll("_", " ") ?? "recorded"}.`);
     } catch (error) {
@@ -739,7 +913,7 @@ export default function Home() {
       if (refresh.ok) {
         const data = await refresh.json() as { cases?: PersistentCase[] };
         const persisted = (data.cases ?? []).map(persistentCaseToView);
-        setCases((current) => [...persisted, ...current.filter((item) => !persisted.some((saved) => saved.id === item.id))]);
+        setCases(persisted);
       }
       notify(`${result.importedCases ?? 0} candidate cases created with immutable source links.`);
     } catch (error) {
@@ -760,19 +934,39 @@ export default function Home() {
     await processUpload(new File([text], fileName, { type: "text/plain" }), text);
   };
 
-  const copyDraft = async () => {
+  const copyDraft = async (messageOverride?: string, draftId?: string) => {
     if (!selectedCase) return;
-    const message = `Subject: WHT evidence required for ${selectedCase.invoice}\n\nHello ${selectedCase.customer} team,\n\nOur records show a WHT deduction of ${formatNaira(selectedCase.amount)} linked to invoice ${selectedCase.invoice}. ${selectedCase.nextAction}. Please share the supporting receipt or correction confirmation so we can complete our reconciliation.\n\nRegards,\nWHT Recovery Team`;
+    const message = messageOverride ?? `Subject: WHT evidence required for ${selectedCase.invoice}\n\nHello ${selectedCase.customer} team,\n\nOur records show a WHT deduction of ${formatNaira(selectedCase.amount)} linked to invoice ${selectedCase.invoice}. ${selectedCase.nextAction}. Please share the supporting receipt or correction confirmation so we can complete our reconciliation.\n\nRegards,\nWHT Recovery Team`;
+    if (appMode === "live" && draftId) {
+      const response = await fetch("/api/operations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "approve-draft", caseId: selectedCase.id, draftId, note: "Reviewed and approved for copying to the external communication channel" }) });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) { notify(result.error || "Draft approval could not be recorded"); return; }
+    }
     await navigator.clipboard?.writeText(message);
-    notify("Approved request copied to clipboard");
+    notify(appMode === "live" && draftId ? "Draft approval recorded and request copied" : appMode === "demo" ? "Demo request copied; no approval event was recorded" : "Request copied to clipboard");
   };
 
   const downloadPack = async () => {
     if (!selectedCase) return;
-    let assistedSummary: { executiveSummary: string; exceptionNarrative: string; correspondenceSummary: string; resolutionHistory: string; outstandingItemsSummary: string; sourceLabels: string[] } | null = null;
+    if (appMode === "live") {
+      try {
+        const response = await fetch("/api/audit-pack", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ caseId: selectedCase.id }) });
+        if (!response.ok) { const result = await response.json() as { error?: string }; throw new Error(result.error || "Audit pack could not be generated"); }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = `${selectedCase.id.toLowerCase()}-audit-pack.json`;
+        anchor.click();
+        URL.revokeObjectURL(url);
+        notify("Immutable audit pack downloaded");
+      } catch (error) { notify(error instanceof Error ? error.message : "Audit pack could not be generated"); }
+      return;
+    }
+    let assistedSummary: EvidenceSummary | null = null;
     try {
       const response = await fetch("/api/assistant", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "evidence-summary", caseId: selectedCase.id, documentId: selectedCase.sourceDocumentId, facts: { customer: selectedCase.customer, invoice: selectedCase.invoice, narrative: selectedCase.narrative, exception: selectedCase.exception, communicationStatus: "No external communication has been sent by the application.", historySummary: `Current stage: ${stageLabels[selectedCase.stage]}. Last movement: ${selectedCase.updated}.`, outstanding: selectedCase.evidence.filter((item) => item.state !== "verified").map((item) => `${item.label}: ${item.detail}`), checks: selectedCase.checks } }) });
-      const result = await response.json() as { output?: typeof assistedSummary };
+      const result = await response.json() as { output?: EvidenceSummary };
       if (response.ok && result.output) assistedSummary = result.output;
     } catch { /* The deterministic report remains available when assistance is offline. */ }
     const escape = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
@@ -827,7 +1021,7 @@ export default function Home() {
         <div className="sidebar-foot">
           <div className="utility-nav" aria-label="Workspace utilities">
             <button disabled title="Support centre coming soon"><HelpCircle size={17} /><span>Support</span><small>Coming soon</small></button>
-            <button disabled title="Workspace settings coming soon"><Settings2 size={17} /><span>Settings</span><small>Coming soon</small></button>
+            <button className={view === "settings" && !selectedCase ? "active" : ""} onClick={() => navigate("settings")}><Settings2 size={17} /><span>Settings</span></button>
           </div>
           <div className="pilot-chip">
             <ShieldCheck size={17} />
@@ -836,14 +1030,20 @@ export default function Home() {
               <span>Human approval required</span>
             </div>
           </div>
-          <div className="profile-row">
-            <div className="avatar">AO</div>
-            <div>
-              <strong>Adanna Okafor</strong>
-              <span>Tax reviewer</span>
-            </div>
+          <button
+            type="button"
+            className={`profile-row ${view === "settings" && !selectedCase ? "active" : ""}`}
+            onClick={() => navigate("settings")}
+            aria-current={view === "settings" && !selectedCase ? "page" : undefined}
+            title="Open settings"
+          >
+            <span className="avatar">{profileInitials}</span>
+            <span className="profile-copy">
+              <strong>{profileName}</strong>
+              <span>{appMode === "live" ? session?.workspace.role.replaceAll("_", " ") ?? "Loading role" : "Tax reviewer"}</span>
+            </span>
             <Settings2 size={17} />
-          </div>
+          </button>
         </div>
       </aside>
 
@@ -857,8 +1057,8 @@ export default function Home() {
           <div className="entity-switcher">
             <span className="entity-mark">AC</span>
             <div>
-              <strong>Aster Consulting Ltd</strong>
-              <span>FY 2026 · Federal WHT</span>
+              <strong>{appMode === "live" ? session?.workspace.name ?? "Live workspace" : "Aster Consulting Ltd"}</strong>
+              <span>{appMode === "live" ? `${session?.workspace.role?.replaceAll("_", " ") ?? "Loading access"} · persisted records` : "Demo portfolio · synthetic records"}</span>
             </div>
             <ChevronRight size={16} />
           </div>
@@ -889,17 +1089,23 @@ export default function Home() {
             )}
           </div>
           <div className="topbar-actions">
+            <div className="mode-switch" role="group" aria-label="Workspace data mode">
+              <button className={appMode === "demo" ? "active" : ""} onClick={() => switchMode("demo")} aria-pressed={appMode === "demo"}>Demo</button>
+              <button className={appMode === "live" ? "active" : ""} onClick={() => switchMode("live")} aria-pressed={appMode === "live"}>Live</button>
+            </div>
             <button className="icon-button" aria-label="Help centre coming soon" title="Help centre coming soon" disabled><HelpCircle size={18} /></button>
-            <button className="icon-button" aria-label="Activity notifications">
-              <Activity size={18} />
-              <span className="notification-dot" />
+            <button className="icon-button theme-toggle" onClick={toggleTheme} aria-label="Toggle light or dark mode" title="Toggle light or dark mode">
+              <Sun className="theme-icon-light" size={18} />
+              <Moon className="theme-icon-dark" size={18} />
             </button>
-            {view !== "imports" && !selectedCase && <button className="primary-button global-import" onClick={() => navigate("imports")} title="Open data intake">
-              <Upload size={17} />
+            {view !== "imports" && !selectedCase && <button className="primary-button global-import" onClick={() => navigate("imports")} aria-label="Import evidence" title="Open data intake">
+              <Upload size={18} strokeWidth={2.3} />
               <span>Import evidence</span>
             </button>}
           </div>
         </header>
+
+        {appMode === "demo" && <div className="demo-mode-banner" role="status"><CircleAlert size={16} /><span><strong>Demo data</strong> — synthetic records are isolated from the live workspace. Changes remain in this browser and do not create audit events.</span><button onClick={() => switchMode("live")}>Open live workspace</button></div>}
 
         {selectedCase ? (
           <CaseWorkspace
@@ -968,8 +1174,9 @@ export default function Home() {
               />
             )}
 
-            {view === "rules" && <RulesView />}
+            {view === "rules" && <RulesView mode={appMode} onNotify={notify} />}
             {view === "ai-activity" && <AiActivityView onNotify={notify} onOpenCase={openCase} />}
+            {view === "settings" && <SettingsView mode={appMode} session={session} onNotify={notify} onSwitchLive={() => switchMode("live")} onToggleTheme={toggleTheme} />}
           </div>
         )}
       </main>
@@ -1139,17 +1346,21 @@ function CasesView({
               aria-label="Filter the current recovery list"
             />
           </label>
-          <label className="filter-field">
+          <div className="filter-field">
             <ListFilter size={17} />
-            <select value={filter} onChange={(event) => onFilterChange(event.target.value as CaseFilter)}>
-              <option value="all">All statuses</option>
-              <option value="open">All open cases</option>
-              <option value="needs-intervention">Needs intervention</option>
-              {Object.entries(stageLabels).map(([value, label]) => (
-                <option key={value} value={value}>{label}</option>
-              ))}
-            </select>
-          </label>
+            <CustomSelect
+              value={filter}
+              onChange={onFilterChange}
+              ariaLabel="Filter recovery cases by status"
+              className="filter-select"
+              options={[
+                { value: "all", label: "All statuses" },
+                { value: "open", label: "All open cases" },
+                { value: "needs-intervention", label: "Needs intervention" },
+                ...Object.entries(stageLabels).map(([value, label]) => ({ value: value as CaseStage, label })),
+              ]}
+            />
+          </div>
         </div>
         <RecoveryTable cases={cases} onOpenCase={onOpenCase} />
         {cases.length === 0 && (
@@ -1349,18 +1560,17 @@ function ImportsView({
             <div className="mapping-editor">
               <div className="mapping-header"><span>Source column</span><span>Map to</span><span>Suggestion</span></div>
               {ledgerMappings.map((mapping, index) => (
-                <label className="mapping-row" key={mapping.sourceColumn}>
+                <div className="mapping-row" key={mapping.sourceColumn}>
                   <span><strong>{mapping.sourceColumn}</strong><small>{ledgerWorkflow.detectedTypes[mapping.sourceColumn] ?? "text"}</small></span>
-                  <select
+                  <CustomSelect
                     value={mapping.targetField}
                     disabled={ledgerWorkflow.status === "imported" || isLedgerActionRunning}
-                    onChange={(event) => onMappingChange(ledgerMappings.map((item, mappingIndex) => mappingIndex === index ? { ...item, targetField: event.target.value as LedgerTargetField } : item))}
-                    aria-label={`Map ${mapping.sourceColumn}`}
-                  >
-                    {ledgerFieldOptions.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
-                  </select>
+                    onChange={(targetField) => onMappingChange(ledgerMappings.map((item, mappingIndex) => mappingIndex === index ? { ...item, targetField } : item))}
+                    ariaLabel={`Map ${mapping.sourceColumn}`}
+                    options={ledgerFieldOptions}
+                  />
                   <span className="mapping-reason">{mapping.confidence !== undefined ? `${mapping.confidence}%` : "Manual"}<small>{mapping.reason || "Reviewer selected"}</small></span>
-                </label>
+                </div>
               ))}
             </div>
 
@@ -1648,7 +1858,7 @@ function AiActivityView({ onNotify, onOpenCase }: { onNotify: (message: string) 
   };
 
   return <>
-    <section className="page-heading ai-activity-heading"><div><h1>AI activity</h1><p>Review automated tasks, validation outcomes, confidence, latency, and human-review events.</p></div><div className="ai-heading-actions"><label><span className="sr-only">Activity time range</span><select value={range} onChange={(event) => { setRange(event.target.value); setVisibleLimit(20); }}><option value="24h">Last 24 hours</option><option value="7d">Last 7 days</option><option value="30d">Last 30 days</option><option value="all">All time</option></select></label><button className="icon-button" onClick={() => void loadJobs()} aria-label="Refresh AI activity" title="Refresh AI activity"><RefreshCw className={loading ? "spin" : ""} size={17} /></button><button className="secondary-button ai-export-button" onClick={exportLog} disabled={!filteredJobs.length}><Download size={16} />Export log</button></div></section>
+    <section className="page-heading ai-activity-heading"><div><h1>AI activity</h1><p>Review automated tasks, validation outcomes, confidence, latency, and human-review events.</p></div><div className="ai-heading-actions"><CustomSelect value={range} onChange={(nextRange) => { setRange(nextRange); setVisibleLimit(20); }} ariaLabel="Activity time range" options={[{ value: "24h", label: "Last 24 hours" }, { value: "7d", label: "Last 7 days" }, { value: "30d", label: "Last 30 days" }, { value: "all", label: "All time" }]} /><button className="icon-button" onClick={() => void loadJobs()} aria-label="Refresh AI activity" title="Refresh AI activity"><RefreshCw className={loading ? "spin" : ""} size={17} /></button><button className="secondary-button ai-export-button" onClick={exportLog} disabled={!filteredJobs.length}><Download size={16} />Export log</button></div></section>
 
     <section className="ai-operational-summary" aria-label="AI activity summary"><div><strong>{rangedJobs.length}</strong><span>Recorded tasks</span></div><div><strong>{validated}</strong><span>Validated</span></div><div className="review-summary"><CircleAlert size={17} aria-hidden="true" /><strong>{needsReview}</strong><span>Needs review</span></div><div><strong>{validationRate.toFixed(1)}%</strong><span>Validation rate</span></div><div><strong>{formatLatency(medianLatency)}</strong><span>Median latency</span></div></section>
     <p className="ai-governance-note"><ShieldCheck size={16} aria-hidden="true" />AI recommendations are assistive. Amounts, matches, and consequential status changes remain deterministic or reviewer-controlled.</p>
@@ -1657,10 +1867,10 @@ function AiActivityView({ onNotify, onOpenCase }: { onNotify: (message: string) 
       <div className="ai-table-title"><div><h2 id="activity-log-heading">Activity log</h2><p>{filteredJobs.length} {filteredJobs.length === 1 ? "result" : "results"}</p></div><button className="secondary-button ai-mobile-filter-toggle" onClick={() => setFiltersOpen((value) => !value)} aria-expanded={filtersOpen} aria-controls="ai-filter-toolbar"><ListFilter size={16} />Filters{hasFilters && <span className="filter-count" aria-label="Filters active" />}</button></div>
       <div className={`ai-filter-toolbar ${filtersOpen ? "filters-open" : ""}`} id="ai-filter-toolbar">
         <label className="ai-search-field"><Search size={16} aria-hidden="true" /><span className="sr-only">Search tasks or context</span><input value={query} onChange={(event) => { setQuery(event.target.value); setVisibleLimit(20); }} placeholder="Search tasks or context" /></label>
-        <label><span className="sr-only">Status</span><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setVisibleLimit(20); }}><option value="all">All statuses</option><option value="completed">Completed</option><option value="needs_review">Needs review</option><option value="failed">Failed</option><option value="running">Running</option></select></label>
-        <label><span className="sr-only">Task type</span><select value={taskFilter} onChange={(event) => { setTaskFilter(event.target.value); setVisibleLimit(20); }}><option value="all">All task types</option>{taskTypes.map((taskType) => <option value={taskType} key={taskType}>{aiTaskLabel(taskType)}</option>)}</select></label>
-        <label><span className="sr-only">Confidence</span><select value={confidenceFilter} onChange={(event) => { setConfidenceFilter(event.target.value); setVisibleLimit(20); }}><option value="all">All confidence</option><option value="high">High (85%+)</option><option value="medium">Medium (60–84%)</option><option value="low">Low (below 60%)</option><option value="missing">Not available</option></select></label>
-        <label><span className="sr-only">Sort activity</span><select value={sort} onChange={(event) => setSort(event.target.value)}><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="confidence">Highest confidence</option><option value="latency">Longest latency</option></select></label>
+        <CustomSelect value={statusFilter} onChange={(nextStatus) => { setStatusFilter(nextStatus); setVisibleLimit(20); }} ariaLabel="Filter by task status" options={[{ value: "all", label: "All statuses" }, { value: "completed", label: "Completed" }, { value: "needs_review", label: "Needs review" }, { value: "failed", label: "Failed" }, { value: "running", label: "Running" }]} />
+        <CustomSelect value={taskFilter} onChange={(nextTask) => { setTaskFilter(nextTask); setVisibleLimit(20); }} ariaLabel="Filter by task type" options={[{ value: "all", label: "All task types" }, ...taskTypes.map((taskType) => ({ value: taskType, label: aiTaskLabel(taskType) }))]} />
+        <CustomSelect value={confidenceFilter} onChange={(nextConfidence) => { setConfidenceFilter(nextConfidence); setVisibleLimit(20); }} ariaLabel="Filter by confidence" options={[{ value: "all", label: "All confidence" }, { value: "high", label: "High (85%+)" }, { value: "medium", label: "Medium (60–84%)" }, { value: "low", label: "Low (below 60%)" }, { value: "missing", label: "Not available" }]} />
+        <CustomSelect value={sort} onChange={setSort} ariaLabel="Sort AI activity" options={[{ value: "newest", label: "Newest first" }, { value: "oldest", label: "Oldest first" }, { value: "confidence", label: "Highest confidence" }, { value: "latency", label: "Longest latency" }]} />
         {hasFilters && <button className="text-button ai-clear-filters" onClick={clearFilters}>Clear filters</button>}
         <span className="ai-visible-count" aria-live="polite">Showing {visibleJobs.length} of {filteredJobs.length}</span>
       </div>
@@ -1684,14 +1894,186 @@ function AiActivityView({ onNotify, onOpenCase }: { onNotify: (message: string) 
   </>;
 }
 
-function RulesView() {
-  const rules = [
+type SettingsPayload = {
+  workspace: { id: string; name: string; slug: string };
+  client: { id: string; name: string; legalName: string; tin: string; jurisdiction: string };
+  settings: { maxFileBytes: number; maxStorageBytes: number; retentionDays: number };
+  members: Array<{ id: string; user_id: string; email: string; display_name: string; role: string; status: string; created_at: string }>;
+  usage: { documentCount: number; storageBytes: number };
+  ai: { configured: boolean; mode: string; provider: string };
+  permissions: { canManageWorkspace: boolean; canManageMembers: boolean; canManageClient: boolean };
+  currentUserId: string;
+};
+
+type SettingsSection = "general" | "evidence" | "access" | "ai-security";
+
+const settingSections: Array<{ id: SettingsSection; label: string; description: string; icon: typeof Settings2 }> = [
+  { id: "general", label: "Workspace and client", description: "Identity used across live cases", icon: Building2 },
+  { id: "evidence", label: "Evidence governance", description: "File limits and retention", icon: HardDrive },
+  { id: "access", label: "Access and roles", description: "Workspace membership", icon: Users },
+  { id: "ai-security", label: "AI and security", description: "Operational safeguards", icon: ShieldCheck },
+];
+
+function SettingsView({ mode, session, onNotify, onSwitchLive, onToggleTheme }: { mode: AppMode; session: SessionInfo | null; onNotify: (message: string) => void; onSwitchLive: () => void; onToggleTheme: () => void }) {
+  const [section, setSection] = useState<SettingsSection>("general");
+  const [data, setData] = useState<SettingsPayload | null>(null);
+  const [loading, setLoading] = useState(mode === "live");
+  const [saving, setSaving] = useState<string | null>(null);
+  const [workspaceName, setWorkspaceName] = useState("");
+  const [clientName, setClientName] = useState("");
+  const [legalName, setLegalName] = useState("");
+  const [tin, setTin] = useState("");
+  const [jurisdiction, setJurisdiction] = useState("federal");
+  const [maxFileBytes, setMaxFileBytes] = useState("1048576");
+  const [maxStorageBytes, setMaxStorageBytes] = useState("25000000");
+  const [retentionDays, setRetentionDays] = useState("365");
+
+  const applyData = useCallback((payload: SettingsPayload) => {
+    setData(payload);
+    setWorkspaceName(payload.workspace.name);
+    setClientName(payload.client.name);
+    setLegalName(payload.client.legalName);
+    setTin(payload.client.tin);
+    setJurisdiction(payload.client.jurisdiction);
+    setMaxFileBytes(String(payload.settings.maxFileBytes));
+    setMaxStorageBytes(String(payload.settings.maxStorageBytes));
+    setRetentionDays(String(payload.settings.retentionDays));
+  }, []);
+
+  const loadSettings = useCallback(async () => {
+    if (mode !== "live") return;
+    try {
+      const response = await fetch("/api/settings");
+      const payload = await response.json() as SettingsPayload & { error?: string };
+      if (!response.ok) throw new Error(payload.error || "Settings are unavailable");
+      applyData(payload);
+    } catch (error) { onNotify(error instanceof Error ? error.message : "Settings are unavailable"); }
+    finally { setLoading(false); }
+  }, [applyData, mode, onNotify]);
+
+  useEffect(() => {
+    if (mode !== "live") return;
+    let active = true;
+    fetch("/api/settings").then(async (response) => {
+      const payload = await response.json() as SettingsPayload & { error?: string };
+      if (!response.ok) throw new Error(payload.error || "Settings are unavailable");
+      if (active) applyData(payload);
+    }).catch((error) => onNotify(error instanceof Error ? error.message : "Settings are unavailable"))
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [applyData, mode, onNotify]);
+
+  const save = async (name: string, payload: Record<string, unknown>) => {
+    setSaving(name);
+    try {
+      const response = await fetch("/api/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || "Settings could not be saved");
+      await loadSettings();
+      onNotify("Settings saved and added to audit history.");
+    } catch (error) { onNotify(error instanceof Error ? error.message : "Settings could not be saved"); }
+    finally { setSaving(null); }
+  };
+
+  const updateMemberRole = async (membershipId: string, role: string) => {
+    await save(`member-${membershipId}`, { section: "member-role", membershipId, role });
+  };
+
+  if (mode === "demo") return <><section className="page-heading compact-heading"><div><h1>Settings</h1><p>Workspace configuration applies only to persisted live records.</p></div></section><section className="settings-demo-boundary"><LockKeyhole size={22} /><div><h2>Demo settings are isolated</h2><p>The synthetic portfolio does not have editable identity, access or retention settings. Switch to Live to manage the authenticated workspace.</p></div><button className="primary-button" onClick={onSwitchLive}>Open live settings</button></section></>;
+
+  return <>
+    <section className="page-heading compact-heading settings-heading"><div><h1>Settings</h1><p>Manage the live workspace, evidence policy and practitioner access.</p></div><span className="settings-scope"><LockKeyhole size={15} />{session?.workspace.name ?? "Live workspace"}</span></section>
+    <div className="settings-layout">
+      <nav className="settings-nav" aria-label="Settings sections">{settingSections.map((item) => { const Icon = item.icon; return <button key={item.id} className={section === item.id ? "active" : ""} onClick={() => setSection(item.id)} aria-current={section === item.id ? "page" : undefined}><Icon size={17} /><span><strong>{item.label}</strong><small>{item.description}</small></span><ChevronRight size={15} /></button>; })}</nav>
+      <section className="settings-surface" aria-live="polite">{loading || !data ? <SettingsSkeleton /> : <>
+        {section === "general" && <div className="settings-section"><div className="settings-section-title"><h2>Workspace and client</h2><p>These names and tax identifiers appear on cases, reports and audit packs.</p></div><form onSubmit={(event) => { event.preventDefault(); void save("workspace", { section: "workspace", name: workspaceName }); }}><fieldset disabled={!data.permissions.canManageWorkspace || saving !== null}><legend>Workspace identity</legend><label>Workspace name<input value={workspaceName} onChange={(event) => setWorkspaceName(event.target.value)} minLength={3} maxLength={100} required /></label><div className="settings-readonly"><span>Workspace ID</span><code>{data.workspace.id}</code></div><div className="settings-form-actions"><span>{data.permissions.canManageWorkspace ? "Changes are recorded in immutable audit history." : "Administrator access is required."}</span><button className="primary-button" type="submit" disabled={workspaceName.trim() === data.workspace.name || saving !== null}>{saving === "workspace" ? <RefreshCw className="spin" size={16} /> : <Check size={16} />}Save workspace</button></div></fieldset></form><form onSubmit={(event) => { event.preventDefault(); void save("client", { section: "client", name: clientName, legalName, tin, jurisdiction }); }}><fieldset disabled={!data.permissions.canManageClient || saving !== null}><legend>Default client</legend><div className="settings-form-grid"><label>Display name<input value={clientName} onChange={(event) => setClientName(event.target.value)} minLength={2} maxLength={100} required /></label><label>Legal name<input value={legalName} onChange={(event) => setLegalName(event.target.value)} minLength={2} maxLength={160} required /></label><label>Tax identification number<input value={tin} onChange={(event) => setTin(event.target.value)} placeholder="Enter approved entity TIN" maxLength={30} /></label><label>Jurisdiction<CustomSelect ariaLabel="Client jurisdiction" value={jurisdiction} onChange={setJurisdiction} options={[{ value: "federal", label: "Federal" }, { value: "state", label: "State" }, { value: "mixed", label: "Mixed" }]} /></label></div><div className="settings-form-actions"><span>Receipt beneficiary checks use this approved entity identity.</span><button className="primary-button" type="submit" disabled={saving !== null}>{saving === "client" ? <RefreshCw className="spin" size={16} /> : <Check size={16} />}Save client</button></div></fieldset></form></div>}
+        {section === "evidence" && <div className="settings-section"><div className="settings-section-title"><h2>Evidence governance</h2><p>Set storage limits that match the current D1 document architecture.</p></div><div className="storage-position"><div><span>Stored evidence</span><strong>{data.usage.documentCount} {data.usage.documentCount === 1 ? "document" : "documents"}</strong></div><div><span>Storage used</span><strong>{(data.usage.storageBytes / 1_000_000).toFixed(2)} MB of {(data.settings.maxStorageBytes / 1_000_000).toFixed(0)} MB</strong></div><div className="storage-track" role="progressbar" aria-label="Workspace evidence storage used" aria-valuemin={0} aria-valuemax={data.settings.maxStorageBytes} aria-valuenow={data.usage.storageBytes}><span style={{ width: `${Math.min(100, data.usage.storageBytes / data.settings.maxStorageBytes * 100)}%` }} /></div></div><form onSubmit={(event) => { event.preventDefault(); void save("governance", { section: "governance", maxFileBytes: Number(maxFileBytes), maxStorageBytes: Number(maxStorageBytes), retentionDays: Number(retentionDays) }); }}><fieldset disabled={!data.permissions.canManageWorkspace || saving !== null}><legend>Document policy</legend><div className="settings-form-grid"><label>Maximum file size<CustomSelect ariaLabel="Maximum file size" value={maxFileBytes} onChange={setMaxFileBytes} options={[{ value: "250000", label: "250 KB" }, { value: "500000", label: "500 KB" }, { value: "1048576", label: "1 MB" }]} /><small>D1 row constraints limit individual originals to 1 MB.</small></label><label>Workspace storage limit<CustomSelect ariaLabel="Workspace storage limit" value={maxStorageBytes} onChange={setMaxStorageBytes} options={[{ value: "10000000", label: "10 MB" }, { value: "25000000", label: "25 MB" }, { value: "50000000", label: "50 MB" }, { value: "100000000", label: "100 MB" }]} /></label><label>Retention period<CustomSelect ariaLabel="Evidence retention period" value={retentionDays} onChange={setRetentionDays} options={[{ value: "90", label: "90 days" }, { value: "365", label: "1 year" }, { value: "1095", label: "3 years" }, { value: "2555", label: "7 years" }]} /><small>Deletion remains an administrator-controlled, audited action.</small></label></div><div className="settings-form-actions"><span>New uploads use this policy. Existing retention dates are not rewritten.</span><button className="primary-button" type="submit" disabled={saving !== null}>{saving === "governance" ? <RefreshCw className="spin" size={16} /> : <Check size={16} />}Save policy</button></div></fieldset></form></div>}
+        {section === "access" && <div className="settings-section"><div className="settings-section-title"><h2>Access and roles</h2><p>Roles control settings, review decisions, reporting and case operations.</p></div><div className="settings-member-table" role="table" aria-label="Workspace members"><div role="row" className="settings-member-head"><span role="columnheader">Member</span><span role="columnheader">Status</span><span role="columnheader">Role</span></div>{data.members.map((member) => <div role="row" key={member.id}><span role="cell" className="settings-member-identity"><span className="avatar">{member.display_name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</span><span><strong>{member.display_name}{member.user_id === data.currentUserId ? " (you)" : ""}</strong><small>{member.email}</small></span></span><span role="cell"><span className="member-status"><CheckCircle2 size={14} />{member.status}</span></span><span role="cell">{data.permissions.canManageMembers ? <CustomSelect ariaLabel={`Role for ${member.display_name}`} value={member.role} onChange={(role) => void updateMemberRole(member.id, role)} disabled={member.user_id === data.currentUserId || saving !== null} options={[{ value: "admin", label: "Administrator" }, { value: "practitioner", label: "Practitioner" }, { value: "reviewer", label: "Reviewer" }, { value: "analyst", label: "Analyst" }, { value: "read_only", label: "Read only" }]} /> : <span>{member.role.replaceAll("_", " ")}</span>}</span></div>)}</div><div className="settings-inline-note"><ShieldCheck size={17} /><p>Invitations are not enabled in this MVP. Identity is provisioned by the trusted authentication proxy, then assigned to an existing workspace by an administrator.</p></div></div>}
+        {section === "ai-security" && <div className="settings-section"><div className="settings-section-title"><h2>AI and security</h2><p>Review service availability and controls without exposing provider secrets.</p></div><div className="settings-status-list"><div><span className={`settings-status-icon ${data.ai.configured ? "success" : "warning"}`}><Bot size={18} /></span><span><strong>AI-assisted receipt extraction</strong><small>{data.ai.configured ? `${data.ai.provider} is available. Outputs remain advisory and reviewable.` : "Receipt extraction is unavailable. Manual entry remains available."}</small></span><span className={`stage-badge ${data.ai.configured ? "stage-recognised" : "stage-evidence-needed"}`}>{data.ai.configured ? "Available" : "Action required"}</span></div><div><span className="settings-status-icon success"><LockKeyhole size={18} /></span><span><strong>Server-grounded assistant</strong><small>Case facts are rebuilt from workspace-scoped D1 records. Browser facts are ignored.</small></span><span className="stage-badge stage-recognised">Enforced</span></div><div><span className="settings-status-icon success"><History size={18} /></span><span><strong>Immutable audit history</strong><small>Update and delete triggers protect audit events. Settings changes record before and after values.</small></span><span className="stage-badge stage-recognised">Enforced</span></div><div><span className="settings-status-icon success"><ShieldCheck size={18} /></span><span><strong>Human decision gates</strong><small>Recognition and utilisation remain blocked until mandatory evidence controls pass.</small></span><span className="stage-badge stage-recognised">Enforced</span></div></div><div className="appearance-setting"><span><Sun size={18} /><span><strong>Appearance</strong><small>Switch between the dark operations theme and high-contrast light theme.</small></span></span><button className="secondary-button" onClick={onToggleTheme}><Sun size={16} />Toggle theme</button></div><div className="settings-inline-note"><CircleAlert size={17} /><p>Secrets are managed outside the product interface. Contact the deployment administrator to rotate or restore provider credentials.</p></div></div>}
+      </>}</section>
+    </div>
+  </>;
+}
+
+function SettingsSkeleton() {
+  return <div className="settings-skeleton" aria-label="Loading workspace settings"><span /><span /><span /><span /></div>;
+}
+
+function humaniseCopilotText(value: string) {
+  return value.replace(/\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b/g, (code) => code.toLowerCase().replaceAll("_", " "));
+}
+
+function copilotSourceLabel(source: string) {
+  const labels: Record<string, string> = {
+    "case.exception": "Case exception",
+    "case.evidence": "Connected evidence",
+    "case.deterministicChecks": "Deterministic checks",
+    "case.authorityReconciliation": "Authority reconciliation",
+    "case.auditHistory": "Case history",
+    "case.identity": "Case identity",
+    "case.financialPosition": "Financial position",
+  };
+  return labels[source] ?? source.replaceAll(".", " · ");
+}
+
+function RulesView({ mode, onNotify }: { mode: AppMode; onNotify: (message: string) => void }) {
+  const controlDefinitions = [
     { name: "AI-assisted receipt extraction", logic: "Receipt text is converted into source-grounded fields", control: "Extraction cannot recognise or close a case", status: "Assistive" },
     { name: "Payment-gap candidate", logic: "Invoice gross less matched payment exceeds configured tolerance", control: "Reviewer confirms applicability", status: "Active" },
     { name: "Beneficiary identity", logic: "Receipt TIN must equal the approved entity master TIN", control: "Exact match required", status: "Active" },
     { name: "Receipt amount", logic: "Expected, receipt and authority amounts are compared separately", control: "Partial states preserved", status: "Active" },
     { name: "External communication", logic: "Drafts use case facts and evidence references only", control: "Human approval required", status: "Enforced" },
   ];
+  const [ruleSets, setRuleSets] = useState<Array<{ id: string; version: string; status: string; effective_start: string; practitioner_notes: string; approved_at: string | null }>>([]);
+  const [loading, setLoading] = useState(mode === "live");
+  const [version, setVersion] = useState("2026.08");
+  const [effectiveStart, setEffectiveStart] = useState("2026-08-01");
+  const [note, setNote] = useState("");
+  const [approvalNote, setApprovalNote] = useState("");
+
+  const load = useCallback(async () => {
+    if (mode === "demo") return;
+    try {
+      const response = await fetch("/api/rules");
+      const result = await response.json() as { rules?: typeof ruleSets; error?: string };
+      if (!response.ok) throw new Error(result.error || "Rule sets are unavailable");
+      setRuleSets(result.rules ?? []);
+    } catch (error) { onNotify(error instanceof Error ? error.message : "Rule sets are unavailable"); }
+    finally { setLoading(false); }
+  }, [mode, onNotify]);
+
+  useEffect(() => {
+    if (mode === "demo") return;
+    let active = true;
+    fetch("/api/rules").then(async (response) => {
+      const result = await response.json() as { rules?: typeof ruleSets; error?: string };
+      if (!response.ok) throw new Error(result.error || "Rule sets are unavailable");
+      if (active) setRuleSets(result.rules ?? []);
+    }).catch((error) => onNotify(error instanceof Error ? error.message : "Rule sets are unavailable"))
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [mode, onNotify]);
+
+  const createRuleSet = async () => {
+    if (mode === "demo") { onNotify("Switch to Live workspace to create governed rule sets."); return; }
+    try {
+      const response = await fetch("/api/rules", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "create", version, effectiveStart, amountToleranceKobo: 10_000, applicabilityCategories: ["services", "contracts", "rent", "commission"], note }) });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || "Rule set could not be created");
+      setNote(""); await load(); onNotify("Draft rule set created. A practitioner must approve it before use.");
+    } catch (error) { onNotify(error instanceof Error ? error.message : "Rule set could not be created"); }
+  };
+
+  const approve = async (ruleSetId: string) => {
+    if (approvalNote.trim().length < 10) { onNotify("Approval was not recorded; a rationale of at least 10 characters is required."); return; }
+    try {
+      const response = await fetch("/api/rules", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "approve", ruleSetId, note: approvalNote }) });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || "Rule set could not be approved");
+      setApprovalNote(""); await load(); onNotify("Rule set approved with immutable change history.");
+    } catch (error) { onNotify(error instanceof Error ? error.message : "Rule set could not be approved"); }
+  };
+  const active = ruleSets.find((rule) => rule.status === "approved");
 
   return (
     <>
@@ -1705,14 +2087,16 @@ function RulesView() {
       <section className="rule-summary">
         <div>
           <span className="rule-icon"><ShieldCheck size={21} /></span>
-          <div><strong>Rule set 2026.07</strong><span>Effective 1 July 2026 · Approved by AO</span></div>
+          <div><strong>{mode === "demo" ? "Demo rule illustrations" : active ? `Rule set ${active.version}` : "No approved rule set"}</strong><span>{mode === "demo" ? "Synthetic walkthrough only" : active ? `Effective ${active.effective_start} · Approval recorded ${active.approved_at ? new Date(active.approved_at).toLocaleDateString("en-NG") : "in audit history"}` : "Live imports are blocked until a practitioner approves a rule set"}</span></div>
         </div>
-        <span className="stage-badge stage-recognised">Current</span>
+        <span className={`stage-badge ${active ? "stage-recognised" : "stage-evidence-needed"}`}>{mode === "demo" ? "Demo" : active ? "Current" : "Action required"}</span>
       </section>
+
+      {mode === "live" && <section className="work-panel rule-editor"><div className="panel-heading"><div><h2>Versioned rule sets</h2><p>Create a draft, then record a separate practitioner approval before it becomes effective.</p></div></div>{loading ? <p>Loading rule sets…</p> : <><div className="rule-form"><label>Version<input value={version} onChange={(event) => setVersion(event.target.value)} placeholder="2026.08" /></label><label>Effective date<input type="date" value={effectiveStart} onChange={(event) => setEffectiveStart(event.target.value)} /></label><label className="rule-note">Change rationale<textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="Explain why this rule set is needed" /></label><button className="primary-button" onClick={() => void createRuleSet()} disabled={note.trim().length < 10}>Create draft</button></div>{ruleSets.some((rule) => rule.status === "draft") && <label className="rule-approval-note">Approval rationale<input value={approvalNote} onChange={(event) => setApprovalNote(event.target.value)} placeholder="Record the basis for practitioner approval" /></label>}<div className="rule-set-history">{ruleSets.map((rule) => <div key={rule.id}><span><strong>{rule.version}</strong><small>Effective {rule.effective_start} · {rule.status}</small></span>{rule.status === "draft" && <button className="secondary-button" onClick={() => void approve(rule.id)} disabled={approvalNote.trim().length < 10}>Review and approve</button>}</div>)}{!ruleSets.length && <p>No governed rule sets have been created in this workspace.</p>}</div></>}</section>}
 
       <section className="work-panel rule-panel">
         <div className="rule-list">
-          {rules.map((rule, index) => (
+          {controlDefinitions.map((rule, index) => (
             <div className="rule-row" key={rule.name}>
               <span className="rule-number">{String(index + 1).padStart(2, "0")}</span>
               <div><strong>{rule.name}</strong><span>{rule.logic}</span></div>
@@ -1748,7 +2132,7 @@ function CaseWorkspace({
   draftVisible: boolean;
   onBack: () => void;
   onToggleDraft: () => void;
-  onCopyDraft: () => void;
+  onCopyDraft: (message?: string, draftId?: string) => void;
   onDownload: () => void;
   onRecognise: () => void | Promise<void>;
   onClose: () => void | Promise<void>;
@@ -1767,9 +2151,19 @@ function CaseWorkspace({
   const [reviewCompleted, setReviewCompleted] = useState(recoveryCase.stage === "recognised" || recoveryCase.stage === "closed");
   const [assistantLoading, setAssistantLoading] = useState<string | null>(null);
   const [recoveryPlan, setRecoveryPlan] = useState<{ recommendedAction: string; evidenceChecklist: Array<{ item: string; status: string; responsibleParty: string }>; suggestedPriority: string; priorityReasons: string[]; suggestedDueInDays: number; escalationInDays: number; uncertainty: string } | null>(null);
-  const [generatedDraft, setGeneratedDraft] = useState<{ subject: string; body: string; disclaimer: string; sourceLabels: string[] } | null>(null);
+  const [generatedDraft, setGeneratedDraft] = useState<{ id?: string; subject: string; body: string; disclaimer: string; sourceLabels: string[] } | null>(null);
   const [copilotQuestion, setCopilotQuestion] = useState("");
+  const copilotInputRef = useRef<HTMLTextAreaElement>(null);
   const [copilotAnswer, setCopilotAnswer] = useState<{ answer: string; sourceLabels: string[]; limitations: string[]; suggestedAction: string } | null>(null);
+  const copilotExamples = [
+    "What evidence is missing?",
+    "Why is recognition blocked?",
+    "What should I do next?",
+  ];
+  const chooseCopilotExample = (question: string) => {
+    setCopilotQuestion(question);
+    requestAnimationFrame(() => copilotInputRef.current?.focus());
+  };
   const canRecognise = reviewCompleted && allMatched && mandatoryEvidenceComplete;
   const canClose = recoveryCase.stage === "recognised" && mandatoryEvidenceComplete;
   const outstandingRequirements = [
@@ -1800,11 +2194,21 @@ function CaseWorkspace({
   const runAssistant = async (action: "recovery-plan" | "communication-draft" | "copilot") => {
     setAssistantLoading(action);
     try {
-      const response = await fetch("/api/assistant", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, caseId: recoveryCase.id, documentId: recoveryCase.sourceDocumentId, facts: action === "copilot" ? { ...assistantFacts, question: copilotQuestion } : assistantFacts }) });
-      const result = await response.json() as { error?: string; output?: unknown };
+      const response = await fetch("/api/assistant", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action,
+          caseId: recoveryCase.id,
+          documentId: recoveryCase.sourceDocumentId,
+          question: action === "copilot" ? copilotQuestion.trim() : undefined,
+          draftType: action === "communication-draft" ? assistantFacts.draftType : undefined,
+        }),
+      });
+      const result = await response.json() as { error?: string; output?: unknown; artifact?: { id: string } | null };
       if (!response.ok || !result.output) throw new Error(result.error || "Assistant output was unavailable");
       if (action === "recovery-plan") setRecoveryPlan(result.output as typeof recoveryPlan);
-      if (action === "communication-draft") setGeneratedDraft(result.output as typeof generatedDraft);
+      if (action === "communication-draft") setGeneratedDraft({ ...(result.output as NonNullable<typeof generatedDraft>), id: result.artifact?.id });
       if (action === "copilot") setCopilotAnswer(result.output as typeof copilotAnswer);
       onNotify(`${action.replaceAll("-", " ")} generated for reviewer consideration.`);
     } catch (error) {
@@ -1919,7 +2323,7 @@ function CaseWorkspace({
               {generatedDraft ? <>
                 <div className="draft-meta"><span>To: Accounts payable, {recoveryCase.customer}</span><span>Case: {recoveryCase.id}</span></div>
                 <div className="draft-copy"><strong>Subject: {generatedDraft.subject}</strong>{generatedDraft.body.split("\n").map((line, index) => line ? <p key={index}>{line}</p> : null)}<small>Sources: {generatedDraft.sourceLabels.join(" · ")}</small></div>
-                <div className="draft-actions"><span><ShieldCheck size={16} /> {generatedDraft.disclaimer}</span><button className="primary-button" onClick={() => { void navigator.clipboard?.writeText(`Subject: ${generatedDraft.subject}\n\n${generatedDraft.body}`); onCopyDraft(); }}><Check size={17} /> Approve and copy</button></div>
+                <div className="draft-actions"><span><ShieldCheck size={16} /> {generatedDraft.disclaimer}</span><button className="primary-button" onClick={() => onCopyDraft(`Subject: ${generatedDraft.subject}\n\n${generatedDraft.body}`, generatedDraft.id)}><Check size={17} /> Approve and copy</button></div>
               </> : <div className="assistant-empty"><Quote size={20} /><div><strong>Generate a case-grounded draft</strong><p>The assistant may use only the displayed customer, reference, amount, exception and next action. It cannot send the message.</p></div><button className="primary-button" onClick={() => void runAssistant("communication-draft")} disabled={assistantLoading !== null}>{assistantLoading === "communication-draft" ? <RefreshCw className="spin" size={17} /> : <Mail size={17} />}Generate draft</button></div>}
             </section>
           )}
@@ -1971,9 +2375,19 @@ function CaseWorkspace({
 
           <section className="case-copilot">
             <div className="section-heading"><div><h2>Case copilot</h2><p>Answers only from this case and its connected controls.</p></div><FileSearch2 size={18} /></div>
-            <label><span className="sr-only">Question about this case</span><textarea value={copilotQuestion} onChange={(event) => setCopilotQuestion(event.target.value)} placeholder="Why is this case blocked? What evidence is missing?" /></label>
+            <label><span className="sr-only">Question about this case</span><textarea ref={copilotInputRef} value={copilotQuestion} onChange={(event) => setCopilotQuestion(event.target.value)} placeholder="Ask anything about this case" /></label>
+            <div className="copilot-examples" aria-label="Example case questions">
+              <span>Try asking</span>
+              {copilotExamples.map((question) => <button type="button" key={question} onClick={() => chooseCopilotExample(question)}>{question}</button>)}
+            </div>
             <button className="secondary-button full-button" onClick={() => void runAssistant("copilot")} disabled={copilotQuestion.trim().length < 5 || assistantLoading !== null}>{assistantLoading === "copilot" ? <RefreshCw className="spin" size={17} /> : <Search size={17} />}Ask about this case</button>
-            {copilotAnswer && <div className="copilot-answer"><p>{copilotAnswer.answer}</p><strong>Suggested action</strong><p>{copilotAnswer.suggestedAction}</p><small>Sources: {copilotAnswer.sourceLabels.join(" · ") || "No case source used"}</small>{copilotAnswer.limitations.map((item) => <small key={item}>{item}</small>)}</div>}
+            {copilotAnswer && <section className="copilot-answer" aria-label="Case copilot answer" aria-live="polite">
+              <div className="copilot-answer-heading"><span className="copilot-answer-icon"><Bot size={17} /></span><div><strong>Case answer</strong><small>Grounded in connected case records</small></div></div>
+              <p className="copilot-answer-copy">{humaniseCopilotText(copilotAnswer.answer)}</p>
+              <div className="copilot-next-step"><ArrowUpRight size={17} /><div><span>Recommended next step</span><strong>{humaniseCopilotText(copilotAnswer.suggestedAction)}</strong></div></div>
+              <div className="copilot-sources"><span>Evidence used</span>{copilotAnswer.sourceLabels.length ? <ul>{copilotAnswer.sourceLabels.map((source) => <li key={source}><CheckCircle2 size={14} />{copilotSourceLabel(source)}</li>)}</ul> : <p>No connected case source was used.</p>}</div>
+              {copilotAnswer.limitations.length > 0 && <details className="copilot-limitations"><summary><span><ShieldCheck size={15} />Scope and limitations</span><ChevronDown size={15} /></summary><ul>{copilotAnswer.limitations.map((item) => <li key={item}>{humaniseCopilotText(item)}</li>)}</ul></details>}
+            </section>}
           </section>
         </aside>
       </div>
