@@ -24,6 +24,7 @@ import {
   useEffect,
   useMemo,
   useCallback,
+  useSyncExternalStore,
   ChangeEvent,
 } from "react";
 import {
@@ -66,10 +67,15 @@ const navItems = [
   { id: "ai-activity" as const, label: "AI activity", icon: Activity },
 ];
 
+const subscribeToHostname = () => () => {};
+const getPublicDemoHost = () => window.location.hostname.endsWith(".workers.dev");
+const getServerDemoHost = () => false;
+
 export function Home() {
   const [view, setView] = useState<View>("overview");
   const [cases, setCases] = useState(initialCases);
   const [appMode, setAppMode] = useState<AppMode>("demo");
+  const publicDemoHost = useSyncExternalStore(subscribeToHostname, getPublicDemoHost, getServerDemoHost);
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [globalQuery, setGlobalQuery] = useState("");
@@ -161,6 +167,7 @@ export function Home() {
   }, [appMode]);
 
   const switchMode = (mode: AppMode) => {
+    if (mode === "live" && window.location.hostname.endsWith(".workers.dev")) return;
     setAppMode(mode);
     setSelectedId(null);
     setLedgerWorkflow(null);
@@ -927,6 +934,8 @@ export function Home() {
                 className={appMode === "live" ? "active" : ""}
                 onClick={() => switchMode("live")}
                 aria-pressed={appMode === "live"}
+                disabled={publicDemoHost}
+                title={publicDemoHost ? "Live workspace requires a protected domain" : undefined}
               >
                 Live
               </button>
@@ -970,9 +979,13 @@ export function Home() {
               the live workspace. Changes remain in this browser and do not
               create audit events.
             </span>
-            <button onClick={() => switchMode("live")}>
-              Open live workspace
-            </button>
+            {publicDemoHost ? (
+              <span className="demo-private-note">Live access requires a protected domain.</span>
+            ) : (
+              <button onClick={() => switchMode("live")}>
+                Open live workspace
+              </button>
+            )}
           </div>
         )}
 

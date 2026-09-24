@@ -22,6 +22,14 @@ type WorkerEnv = Env & {
 const worker = {
   async fetch(request: Request, env: WorkerEnv, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    const publicDemoHost = url.hostname.endsWith(".workers.dev");
+
+    if (publicDemoHost && /^\/api(?:\/|$)/i.test(url.pathname)) {
+      return Response.json(
+        { error: "Live workspace access requires a protected domain." },
+        { status: 403, headers: { "cache-control": "no-store" } },
+      );
+    }
 
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];

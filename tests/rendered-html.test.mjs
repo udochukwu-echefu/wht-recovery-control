@@ -35,6 +35,25 @@ test("server-renders the WHT recovery workspace", async () => {
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/i);
 });
 
+test("public workers.dev demo rejects API access with forged identity headers", async () => {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("public-demo-test", `${process.pid}-${Date.now()}`);
+  const { default: worker } = await import(workerUrl.href);
+  const env = { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } };
+  const ctx = { waitUntil() {}, passThroughOnException() {} };
+  const host = "https://wht-recovery-control.udboy361.workers.dev";
+
+  const page = await worker.fetch(new Request(host), env, ctx);
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /Recovery overview/);
+
+  const api = await worker.fetch(new Request(`${host}/api/session`, {
+    headers: { "oai-authenticated-user-id": "forged-user" },
+  }), env, ctx);
+  assert.equal(api.status, 403);
+  assert.match(await api.text(), /protected domain/);
+});
+
 test("starter preview is removed and product metadata is present", async () => {
   const [page, layout, packageJson] = await Promise.all([
     readWorkspaceSources(),

@@ -54,6 +54,7 @@ export async function requireContext(request: Request, allowedRoles: readonly Wo
     throw new ApiError(403, "Cross-site mutation requests are not allowed.");
   }
   const localDevelopment = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "0.0.0.0";
+  if (url.hostname.endsWith(".workers.dev")) throw new ApiError(403, "Live workspace access requires a protected domain.");
   const providerSubject = header(request, "oai-authenticated-user-id") || (localDevelopment ? "local-development-user" : "");
   const email = header(request, "oai-authenticated-user-email") || (localDevelopment ? "local@wht-recovery.test" : "");
   const displayName = header(request, "oai-authenticated-user-full-name") || (localDevelopment ? "Local practitioner" : "");
