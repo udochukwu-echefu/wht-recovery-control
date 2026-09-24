@@ -23,11 +23,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS `uq_case_outcomes_workspace_case` ON `case_out
 CREATE TRIGGER IF NOT EXISTS authority_allocations_balance_guard BEFORE INSERT ON authority_allocations
 WHEN NEW.result_code IN ('matched','matched_within_tolerance')
 BEGIN
-  SELECT CASE WHEN
+  SELECT (CASE WHEN
     NEW.amount_kobo <= 0 OR
     NEW.amount_kobo + COALESCE((SELECT SUM(amount_kobo) FROM authority_allocations WHERE workspace_id = NEW.workspace_id AND authority_record_id = NEW.authority_record_id AND result_code IN ('matched','matched_within_tolerance')), 0)
       > COALESCE((SELECT amount_kobo FROM authority_records WHERE id = NEW.authority_record_id AND workspace_id = NEW.workspace_id), -1)
-    THEN RAISE(ABORT, 'authority allocation exceeds available balance') END;
+    THEN RAISE(ABORT, 'authority allocation exceeds available balance') END);
 END;--> statement-breakpoint
 CREATE TRIGGER IF NOT EXISTS recovery_case_stage_guard BEFORE UPDATE OF stage ON recovery_cases
 WHEN
