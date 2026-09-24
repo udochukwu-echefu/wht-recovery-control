@@ -10,4 +10,4 @@ dist/
 *.tsbuildinfo
 .env
 .env.local
-.dev.vars
+.dev.vars*

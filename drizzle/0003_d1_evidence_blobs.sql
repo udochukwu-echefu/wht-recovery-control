@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS evidence_blobs (
+  storage_key TEXT PRIMARY KEY NOT NULL,
+  bytes BLOB NOT NULL,
+  content_type TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

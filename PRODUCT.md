@@ -12,28 +12,25 @@ Nigerian finance teams, tax managers, accountants, and tax-practice reviewers wh
 
 Turn fragmented WHT records into an explainable recovery queue. The MVP should detect likely deductions, connect each case to its evidence, expose mismatches without overstating recoverability, coordinate human-approved follow-up, and track cases through recognition and closure. Success means a reviewer can understand and advance a case in minutes, with every conclusion traceable to a source.
 
-## Implemented vertical slice
+## Implemented supervised pilot
 
 ```text
-CSV ledger -> validate/map -> D1 recovery cases
-Receipt PDF/image -> R2 original -> OCR/PDF text stage
-Receipt TXT/paste --------------------------|
-                                            v
-                              DeepSeek V4 Flash 0731
-                                            |
-                                            v
-                              deterministic rule set 2026.07
-                                      |
-                                      v
-                         exception + evidence provenance
-                                      |
-                                      v
-                         reviewer decision -> D1 audit event
+ledger -> preview -> AI mapping suggestion -> reviewer confirmation
+       -> deterministic validation -> candidate cases
+
+receipt -> pilot original in D1 -> classification + duplicate check
+        -> 12 source-grounded fields -> application-owned candidate factors
+        -> AI ranking -> reviewer link confirmation
+        -> deterministic rule set 2026.07 -> exception + explanation
+        -> reviewer field correction -> immutable audit checkpoint
+
+case facts -> reviewable plan / grounded draft / constrained copilot
+           -> printable evidence report / portfolio briefing / AI activity
 ```
 
-AI does not decide recoverability. DeepSeek converts receipt text into six typed facts with source snippets and confidence. Matching, exception codes, status transitions, and audit records are application logic.
+AI does not decide recoverability. Provider outputs pass strict task-specific validation and retain prompt version, source references, latency and safe error categories. Amounts, matching, exception codes, status gates and audit records remain application logic or qualified-human decisions.
 
-Current MVP gaps are authentication/tenant isolation, production OCR for scans and image-only PDFs, direct-to-R2 multipart upload for larger files, authority-system integration, background job orchestration, editable field-level corrections, rules administration, notifications, and production monitoring.
+This remains a controlled pilot rather than an unattended production tax system. Authentication, workspace/client isolation, governed rules and D1-only evidence storage are implemented. Remaining work includes signed identity-assertion verification at the Worker boundary, production OCR for scans/image-only PDFs, background job orchestration, authority-system integration, external delivery controls, production observability, automated retention enforcement, penetration testing, and practitioner/legal validation of Nigerian WHT content and procedures.
 
 ## Brand Personality
 

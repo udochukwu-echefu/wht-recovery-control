@@ -1,0 +1,27 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "wht-recovery-control",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-08-29",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    }
+  },
+  "vars": {
+    "AI_PROVIDER": "deepseek",
+    "DEEPSEEK_MODEL": "deepseek-v4-flash"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "wht-recovery-control-db",
+      "database_id": "0e28b669-3102-4f83-80c5-d31fcbcc86d7",
+      "migrations_dir": "drizzle"
+    }
+  ]
+}

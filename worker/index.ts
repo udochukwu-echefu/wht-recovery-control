@@ -22,6 +22,14 @@ type WorkerEnv = Env & {
 const worker = {
   async fetch(request: Request, env: WorkerEnv, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    const publicDemoHost = url.hostname.endsWith(".workers.dev");
+
+    if (publicDemoHost && /^\/api(?:\/|$)/i.test(url.pathname)) {
+      return Response.json(
+        { error: "Live workspace access requires a protected domain." },
+        { status: 403, headers: { "cache-control": "no-store" } },
+      );
+    }
 
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
@@ -34,7 +42,17 @@ const worker = {
       }, allowedWidths);
     }
 
-    return handler.fetch(request, env, ctx);
+    const response = await handler.fetch(request, env, ctx);
+    const secured = new Response(response.body, response);
+    secured.headers.set("x-content-type-options", "nosniff");
+    secured.headers.set("referrer-policy", "strict-origin-when-cross-origin");
+    secured.headers.set("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=()");
+    secured.headers.set("cross-origin-opener-policy", "same-origin");
+    secured.headers.set("x-frame-options", "DENY");
+    if (url.protocol === "https:") secured.headers.set("strict-transport-security", "max-age=31536000; includeSubDomains");
+    if (url.pathname.startsWith("/api/")) secured.headers.set("cache-control", "private, no-store");
+    secured.headers.set("x-request-id", request.headers.get("cf-ray") || crypto.randomUUID());
+    return secured;
   },
 };
 

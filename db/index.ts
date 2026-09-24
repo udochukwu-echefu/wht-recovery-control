@@ -19,16 +19,17 @@ export function getD1() {
   return env.DB;
 }
 
-export function getEvidenceBucket() {
-  if (!env.EVIDENCE) {
-    throw new Error("Cloudflare R2 binding `EVIDENCE` is unavailable.");
-  }
-  return env.EVIDENCE;
-}
-
 export function getDeepSeekConfig() {
   return {
     apiKey: env.DEEPSEEK_API_KEY?.trim() ?? "",
     model: env.DEEPSEEK_MODEL?.trim() || "deepseek-v4-flash",
+  };
+}
+
+export function getAiConfig() {
+  const deepSeek = getDeepSeekConfig();
+  return {
+    ...deepSeek,
+    mode: env.AI_PROVIDER?.trim().toLowerCase() || "auto",
   };
 }
