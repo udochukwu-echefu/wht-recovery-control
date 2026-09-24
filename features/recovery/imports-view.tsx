@@ -648,7 +648,7 @@ export function ImportsView({
         </button>
       </section>
 
-      <section className="batch-panel">
+      <section className="work-panel batch-panel">
         <div className="section-heading">
           <div>
             <h2>Recent batches</h2>
@@ -693,7 +693,12 @@ export function ImportsView({
                 return (
                   <tr key={`${batch.name}-${index}`}>
                     <td>
-                      <strong>{batch.name}</strong>
+                      <span className="batch-identity">
+                        <span className="batch-identity-icon" aria-hidden="true">
+                          {ledger ? <FileText size={17} /> : <Paperclip size={17} />}
+                        </span>
+                        <strong>{batch.name}</strong>
+                      </span>
                     </td>
                     <td>{ledger ? "Ledger" : "Evidence"}</td>
                     <td>

@@ -149,6 +149,7 @@ function demoAiActivityJobs(anchor = Date.now()): AiActivityJob[] {
 }
 
 const aiTaskLabels: Record<string, string> = {
+  portfolio_copilot: "Portfolio copilot",
   case_copilot: "Case copilot",
   recovery_plan: "Recovery plan",
   exception_explanation: "Exception explanation",

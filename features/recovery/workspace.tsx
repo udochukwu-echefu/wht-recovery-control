@@ -180,7 +180,7 @@ export function Home() {
   const profileName =
     appMode === "live"
       ? (session?.user.displayName ?? "Local practitioner")
-      : "Adanna Okafor";
+      : "Victory Obafemi";
   const profileInitials = profileName
     .split(/\s+/)
     .map((part) => part[0])
@@ -1005,6 +1005,8 @@ export function Home() {
                 openAmount={openAmount}
                 recognisedAmount={recognisedAmount}
                 interventionAmount={interventionAmount}
+                profileName={profileName}
+                sessionScope={appMode === "demo" ? "demo" : `${session?.workspace.id ?? "loading"}:${session?.clientId ?? "loading"}:${session?.user.email ?? "loading"}`}
                 onOpenCase={openCase}
                 onViewCases={() => showCases("all")}
                 onFilterCases={showCases}

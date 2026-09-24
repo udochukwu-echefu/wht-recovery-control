@@ -3,7 +3,7 @@
 import { type RecoveryCase } from "./types";
 import { formatNaira, formatDays } from "./presentation";
 import { StageBadge } from "./badges";
-import { ChevronRight } from "lucide-react";
+import { ArrowUpRight, FileText } from "lucide-react";
 
 export function RecoveryTable({
   cases,
@@ -16,7 +16,7 @@ export function RecoveryTable({
 }) {
   return (
     <div className="table-wrap">
-      <table className="recovery-table">
+      <table className={`recovery-table${compact ? " recovery-table-compact" : ""}`}>
         <thead>
           <tr>
             <th>Customer / reference</th>
@@ -37,15 +37,20 @@ export function RecoveryTable({
               onClick={() => onOpenCase(item.id)}
               tabIndex={0}
               onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ")
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
                   onOpenCase(item.id);
+                }
               }}
             >
               <td data-label="Case">
-                <strong>{item.customer}</strong>
-                <span>
-                  {item.invoice} · {item.id}
-                </span>
+                <div className="case-identity">
+                  <span className="case-identity-icon" aria-hidden="true"><FileText size={17} /></span>
+                  <span className="case-identity-copy">
+                    <strong>{item.customer}</strong>
+                    <small>{item.invoice} · {item.id}</small>
+                  </span>
+                </div>
               </td>
               <td data-label="Expected WHT" className="numeric">
                 <strong>{formatNaira(item.amount)}</strong>
@@ -79,8 +84,12 @@ export function RecoveryTable({
                 <button
                   className="row-button"
                   aria-label={`Open ${item.customer} case`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onOpenCase(item.id);
+                  }}
                 >
-                  <ChevronRight size={17} />
+                  <ArrowUpRight size={17} />
                 </button>
               </td>
             </tr>

@@ -1,9 +1,10 @@
 import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { aiJobs, auditEvents, authorityAllocations, clients, communicationDrafts, correspondenceEvents, evidenceDocuments, extractedFields, matchExecutions, recoveryCases, recoveryPlans } from "@/db/schema";
-import type { AiTaskType, CaseCopilotOutput, CommunicationDraftOutput, EvidenceSummaryOutput, PortfolioBriefingOutput, RecoveryPlanOutput } from "@/lib/ai/contracts";
+import type { AiTaskType, CaseCopilotOutput, CommunicationDraftOutput, EvidenceSummaryOutput, PortfolioBriefingOutput, PortfolioCopilotOutput, RecoveryPlanOutput } from "@/lib/ai/contracts";
 import { runAiTask } from "@/lib/ai/service";
 import { apiError, auditStatement, enforceRateLimit, requireContext, type RequestContext } from "@/lib/auth";
+import { validateUpload } from "@/lib/storage";
 
 export const runtime = "edge";
 
@@ -12,6 +13,7 @@ const actionTask: Record<string, AiTaskType> = {
   "communication-draft": "communication_draft",
   "evidence-summary": "evidence_summary",
   "portfolio-briefing": "portfolio_briefing",
+  "portfolio-copilot": "portfolio_copilot",
   copilot: "case_copilot",
 };
 
@@ -68,7 +70,10 @@ export async function POST(request: Request) {
   try {
     const context = await requireContext(request, ["admin", "practitioner", "reviewer", "analyst"]);
     await enforceRateLimit(context, "assistant", 20, 60);
-    const body = await request.json() as { action?: unknown; caseId?: unknown; documentId?: unknown; question?: unknown; draftType?: unknown };
+    const form = request.headers.get("content-type")?.includes("multipart/form-data") ? await request.formData() : null;
+    const body = form
+      ? Object.fromEntries(form.entries()) as { action?: unknown; caseId?: unknown; documentId?: unknown; question?: unknown; draftType?: unknown }
+      : await request.json() as { action?: unknown; caseId?: unknown; documentId?: unknown; question?: unknown; draftType?: unknown };
     const action = typeof body.action === "string" ? body.action : "";
     const task = actionTask[action];
     if (!task) return Response.json({ error: "A supported assistant action is required." }, { status: 400 });
@@ -77,10 +82,49 @@ export async function POST(request: Request) {
     let documentId: string | undefined;
     const question = typeof body.question === "string" ? body.question.trim().slice(0, 500) : "";
     if (task === "case_copilot" && !question) return Response.json({ error: "Enter a question about this case." }, { status: 400 });
+    if (task === "portfolio_copilot" && !question) return Response.json({ error: "Enter a question about the portfolio." }, { status: 400 });
     let input: Record<string, unknown>;
-    if (task === "portfolio_briefing") {
-      const cases = await getDb().select().from(recoveryCases).where(and(eq(recoveryCases.workspaceId, context.workspace.id), eq(recoveryCases.clientId, context.clientId))).orderBy(desc(recoveryCases.updatedAt)).limit(500);
-      input = { cases: cases.map((item) => ({ id: item.id, customer: item.customer, amountKobo: item.expectedWhtKobo, stage: item.stage, exceptionCode: item.exceptionCode, priority: item.priority, dueDate: item.dueDate, nextAction: item.nextAction })) };
+    if (task === "portfolio_copilot") {
+      const upload = form?.get("file");
+      let attachmentName = "";
+      let attachmentText = "";
+      if (upload instanceof File) {
+        if (upload.size < 1 || upload.size > 65_536) return Response.json({ error: "Attach a TXT or CSV file no larger than 64 KB." }, { status: 413 });
+        const bytes = await upload.arrayBuffer();
+        const fileType = validateUpload(upload, bytes);
+        if (!fileType.isText) return Response.json({ error: "The assistant can read TXT or CSV attachments. Use Data intake for PDF or image evidence." }, { status: 415 });
+        try {
+          attachmentText = new TextDecoder("utf-8", { fatal: true }).decode(bytes).trim().slice(0, 16_000);
+        } catch {
+          return Response.json({ error: "The attachment must contain readable UTF-8 text." }, { status: 422 });
+        }
+        if (!attachmentText) return Response.json({ error: "The attachment contains no readable text." }, { status: 422 });
+        attachmentName = upload.name;
+      }
+      const rows = await getDb().select().from(recoveryCases).where(and(eq(recoveryCases.workspaceId, context.workspace.id), eq(recoveryCases.clientId, context.clientId))).orderBy(desc(recoveryCases.updatedAt)).limit(501);
+      const cases = rows.slice(0, 500);
+      input = {
+        question,
+        portfolioLimited: rows.length > 500,
+        cases: cases.map((item) => ({ id: item.id, customer: item.customer, amountKobo: item.expectedWhtKobo, stage: item.stage, exceptionCode: item.exceptionCode, priority: item.priority, dueDate: item.dueDate, nextAction: item.nextAction })),
+        ...(attachmentText ? { attachmentName, attachmentText } : {}),
+      };
+    } else if (task === "portfolio_briefing") {
+      const rows = await getDb().select().from(recoveryCases).where(and(eq(recoveryCases.workspaceId, context.workspace.id), eq(recoveryCases.clientId, context.clientId))).orderBy(desc(recoveryCases.updatedAt)).limit(501);
+      const cases = rows.slice(0, 500);
+      const intervention = cases.filter((item) => item.stage === "evidence-needed" || item.stage === "in-dispute");
+      const largest = intervention.toSorted((a, b) => b.expectedWhtKobo - a.expectedWhtKobo)[0];
+      const interventionKobo = intervention.reduce((sum, item) => sum + item.expectedWhtKobo, 0);
+      input = {
+        caseIds: cases.map((item) => item.id),
+        interventionCount: intervention.length,
+        interventionFormatted: `₦${(interventionKobo / 100).toLocaleString("en-NG", { maximumFractionDigits: 0 })}`,
+        interventionCaseIds: intervention.map((item) => item.id),
+        largestCustomer: largest?.customer ?? "No blocked case",
+        largestException: largest?.exceptionCode ?? "No open exception",
+        largestCaseId: largest?.id ?? "",
+        dataQualityWarning: `${cases.filter((item) => item.confidence < 70).length} cases have evidence confidence below 70%.${rows.length > 500 ? " This briefing covers only the 500 most recently updated cases." : ""}`,
+      };
     } else {
       if (!caseId) return Response.json({ error: "caseId is required for this assistant action." }, { status: 400 });
       const grounded = await groundCase(context, caseId);
@@ -90,7 +134,7 @@ export async function POST(request: Request) {
       documentId = requestedDocumentId || grounded.evidenceDocuments[0]?.id;
       input = { ...grounded, question: question || undefined, draftType: typeof body.draftType === "string" ? body.draftType.slice(0, 80) : undefined };
     }
-    const result = await runAiTask<RecoveryPlanOutput | CommunicationDraftOutput | EvidenceSummaryOutput | PortfolioBriefingOutput | CaseCopilotOutput>({ type: task, caseId: caseId || undefined, documentId, workspaceId: context.workspace.id, clientId: context.clientId, requestedByUserId: context.user.id, input });
+    const result = await runAiTask<RecoveryPlanOutput | CommunicationDraftOutput | EvidenceSummaryOutput | PortfolioBriefingOutput | PortfolioCopilotOutput | CaseCopilotOutput>({ type: task, caseId: caseId || undefined, documentId, workspaceId: context.workspace.id, clientId: context.clientId, requestedByUserId: context.user.id, input });
     if (!result.output) return Response.json({ error: result.safeMessage ?? "Assistant output requires manual review.", ai: result }, { status: 422 });
     const db = getDb();
     let artifactId: string | null = null;

@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { formatNaira, formatDays } from "./presentation";
 import { PortfolioBriefingPanel } from "./portfolio-briefing";
+import { OverviewAssistant } from "./overview-assistant";
 import { RecoveryTable } from "./recovery-table";
 
 export function Overview({
@@ -24,6 +25,8 @@ export function Overview({
   openAmount,
   recognisedAmount,
   interventionAmount,
+  profileName,
+  sessionScope,
   onOpenCase,
   onViewCases,
   onFilterCases,
@@ -33,6 +36,8 @@ export function Overview({
   openAmount: number;
   recognisedAmount: number;
   interventionAmount: number;
+  profileName: string;
+  sessionScope: string;
   onOpenCase: (id: string) => void;
   onViewCases: () => void;
   onFilterCases: (filter: CaseFilter) => void;
@@ -135,6 +140,16 @@ export function Overview({
         onFilterCases={onFilterCases}
       />
 
+      <OverviewAssistant
+        key={`${mode}:${sessionScope}`}
+        mode={mode}
+        profileName={profileName}
+        cases={cases}
+        onOpenCase={onOpenCase}
+        onViewCases={onViewCases}
+        onFilterCases={onFilterCases}
+      />
+
       <div className="overview-grid">
         <section className="work-panel priority-panel">
           <div className="section-heading">
@@ -153,95 +168,86 @@ export function Overview({
           />
         </section>
 
-        <aside className="portfolio-panel">
-          <div className="section-heading">
-            <div>
-              <h2>Evidence coverage</h2>
-              <p>Value by current control position.</p>
+        <div className="overview-side-column">
+          <aside className="portfolio-panel">
+            <div className="section-heading">
+              <div>
+                <h2>Evidence coverage</h2>
+                <p>Value by current control position.</p>
+              </div>
             </div>
-          </div>
-          <div
-            className="coverage-stack"
-            role="img"
-            aria-label="Portfolio value split by evidence status"
-          >
-            {coverageGroups
-              .filter((group) => group.value > 0)
-              .map((group) => (
-                <span
+            <div className="coverage-breakdown">
+              {coverageGroups.map((group) => (
+                <button
                   key={group.label}
-                  className={`coverage-segment ${group.tone}`}
-                  style={{ width: `${(group.value / coverageTotal) * 100}%` }}
-                  title={`${group.label}: ${formatNaira(group.value)}`}
-                />
+                  onClick={() =>
+                    onFilterCases(
+                      group.label === "Evidence missing"
+                        ? "evidence-needed"
+                        : group.label === "Disputed"
+                          ? "in-dispute"
+                          : group.label === "Recognised"
+                            ? "recognised"
+                            : "open",
+                    )
+                  }
+                >
+                  <span className="coverage-label">
+                    <i className={group.tone} />
+                    {group.label}
+                    <small>
+                      {group.count} {group.count === 1 ? "case" : "cases"}
+                    </small>
+                  </span>
+                  <strong>{formatNaira(group.value)}</strong>
+                  <span className="coverage-progress" aria-hidden="true">
+                    <span
+                      className={group.tone}
+                      style={{ width: `${(group.value / coverageTotal) * 100}%` }}
+                    />
+                  </span>
+                </button>
               ))}
-          </div>
-          <div className="coverage-breakdown">
-            {coverageGroups.map((group) => (
-              <button
-                key={group.label}
-                onClick={() =>
-                  onFilterCases(
-                    group.label === "Evidence missing"
-                      ? "evidence-needed"
-                      : group.label === "Disputed"
-                        ? "in-dispute"
-                        : group.label === "Recognised"
-                          ? "recognised"
-                          : "open",
-                  )
-                }
-              >
-                <span>
-                  <i className={group.tone} />
-                  {group.label}
-                  <small>
-                    {group.count} {group.count === 1 ? "case" : "cases"}
-                  </small>
+            </div>
+          </aside>
+          <section className="activity-band">
+            <div className="section-heading">
+              <div>
+                <h2>Recent case activity</h2>
+              </div>
+            </div>
+            <div className="activity-list">
+              <div>
+                <span className="activity-icon success">
+                  <BadgeCheck size={17} />
                 </span>
-                <strong>{formatNaira(group.value)}</strong>
-              </button>
-            ))}
-          </div>
-        </aside>
+                <p>
+                  <strong>Civic Works</strong> credit matched to authority record{" "}
+                  <span>29 Jul · AO</span>
+                </p>
+              </div>
+              <div>
+                <span className="activity-icon warning">
+                  <CircleAlert size={17} />
+                </span>
+                <p>
+                  <strong>Alpha Energy</strong> moved to dispute after TIN
+                  validation <span>Today · System</span>
+                </p>
+              </div>
+              <div>
+                <span className="activity-icon neutral">
+                  <Mail size={17} />
+                </span>
+                <p>
+                  <strong>Metro Foods</strong> receipt request drafted for approval{" "}
+                  <span>Yesterday · AA</span>
+                </p>
+              </div>
+            </div>
+          </section>
+        </div>
       </div>
-
-      <section className="activity-band">
-        <div className="section-heading">
-          <div>
-            <h2>Recent case activity</h2>
-          </div>
-        </div>
-        <div className="activity-list">
-          <div>
-            <span className="activity-icon success">
-              <BadgeCheck size={17} />
-            </span>
-            <p>
-              <strong>Civic Works</strong> credit matched to authority record{" "}
-              <span>29 Jul · AO</span>
-            </p>
-          </div>
-          <div>
-            <span className="activity-icon warning">
-              <CircleAlert size={17} />
-            </span>
-            <p>
-              <strong>Alpha Energy</strong> moved to dispute after TIN
-              validation <span>Today · System</span>
-            </p>
-          </div>
-          <div>
-            <span className="activity-icon neutral">
-              <Mail size={17} />
-            </span>
-            <p>
-              <strong>Metro Foods</strong> receipt request drafted for approval{" "}
-              <span>Yesterday · AA</span>
-            </p>
-          </div>
-        </div>
-      </section>
     </>
   );
 }

@@ -221,7 +221,7 @@ export function RulesView({
 
       {mode === "live" && (
         <section className="work-panel rule-editor">
-          <div className="panel-heading">
+          <div className="section-heading">
             <div>
               <h2>Versioned rule sets</h2>
               <p>

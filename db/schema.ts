@@ -166,6 +166,34 @@ export const aiJobs = sqliteTable(
   ],
 );
 
+export const assistantConversations = sqliteTable(
+  "assistant_conversations",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id").notNull(),
+    clientId: text("client_id").notNull(),
+    userId: text("user_id").notNull(),
+    title: text("title").notNull().default("New conversation"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [index("idx_assistant_conversations_scope_updated").on(table.workspaceId, table.clientId, table.userId, table.updatedAt)],
+);
+
+export const assistantMessages = sqliteTable(
+  "assistant_messages",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    conversationId: text("conversation_id").notNull().references(() => assistantConversations.id),
+    role: text("role", { enum: ["user", "assistant"] }).notNull(),
+    content: text("content").notNull(),
+    metadataJson: text("metadata_json").notNull().default("{}"),
+    aiJobId: text("ai_job_id"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [index("idx_assistant_messages_conversation_id").on(table.conversationId, table.id)],
+);
+
 export const ledgerImports = sqliteTable(
   "ledger_imports",
   {

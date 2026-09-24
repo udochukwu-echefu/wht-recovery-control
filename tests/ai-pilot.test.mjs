@@ -105,3 +105,19 @@ test("case copilot accepts a natural evidence question without extra reviewer in
   assert.match(output.answer, /WHT receipt/i);
   assert.doesNotMatch(output.answer, /outside this case workspace/i);
 });
+
+test("portfolio copilot grounds replies in scoped cases and rejects invented sources", () => {
+  const definition = getAiTaskDefinition("portfolio_copilot");
+  const input = {
+    question: "Where is evidence still missing?",
+    cases: [{ id: "case-1", customer: "Acme", amountKobo: 5_000_000, stage: "evidence-needed" }],
+  };
+  const output = definition.validateOutput(definition.demoOutput(input), input);
+  assert.match(output.answer, /Acme/);
+  assert.deepEqual(output.sourceLabels, ["portfolio.current"]);
+  assert.throws(() => definition.validateOutput({ ...output, sourceLabels: ["unavailable.case"] }, input), /unavailable source/i);
+  const withAttachment = { ...input, question: "Summarise the attached document", attachmentName: "note.txt", attachmentText: "Receipt pending" };
+  const attachmentOutput = definition.validateOutput(definition.demoOutput(withAttachment), withAttachment);
+  assert.match(attachmentOutput.answer, /Receipt pending/);
+  assert.ok(attachmentOutput.sourceLabels.includes("attachment.text"));
+});

@@ -17,6 +17,7 @@ import {
   type LedgerMappingOutput,
   type LedgerTargetField,
   type PortfolioBriefingOutput,
+  type PortfolioCopilotOutput,
   type ReceiptExtractionOutput,
   type RecoveryPlanOutput,
 } from "./contracts.ts";
@@ -288,6 +289,61 @@ function demoBriefing(input: GenericInput): PortfolioBriefingOutput {
   return { narrative: `${count} ${count === 1 ? "case" : "cases"} worth ${value} require intervention. ${largest} is the largest blocked case and is held by ${largestReason.toLowerCase()}.`, statements: [{ text: `${count} cases require evidence or dispute action`, filter: "needs-intervention", caseIds: Array.isArray(input.interventionCaseIds) ? input.interventionCaseIds.map(String) : [] }, ...(largestId ? [{ text: `${largest} is the largest blocked case`, filter: `case:${largestId}`, caseIds: [largestId] }] : [])], dataQualityWarning: String(input.dataQualityWarning ?? "Review unassessed and low-confidence evidence before acting."), sourceLabels: ["portfolio.interventionCount", "portfolio.interventionValue", "portfolio.largestBlockedCase"] };
 }
 
+function validatePortfolioCopilot(value: unknown, input: GenericInput): PortfolioCopilotOutput {
+  if (!isRecord(value)) throw new Error("Portfolio copilot response must be an object.");
+  assertExactKeys(value, ["answer", "sourceLabels", "limitations", "suggestedAction"], "Portfolio copilot response");
+  const sourceLabels = stringArray(value.sourceLabels, "sourceLabels", 2);
+  const allowed = new Set(["portfolio.current", ...(input.attachmentText ? ["attachment.text"] : [])]);
+  if (sourceLabels.some((label) => !allowed.has(label))) throw new Error("Portfolio copilot cites an unavailable source.");
+  const limitations = stringArray(value.limitations, "limitations", 8);
+  if (input.portfolioLimited && !limitations.some((item) => item.includes("500 most recently updated cases"))) {
+    limitations.push("This answer covers only the 500 most recently updated cases.");
+  }
+  return {
+    answer: stringValue(value.answer, "answer", 1_500),
+    sourceLabels,
+    limitations,
+    suggestedAction: stringValue(value.suggestedAction, "suggestedAction", 400),
+  };
+}
+
+function demoPortfolioCopilot(input: GenericInput): PortfolioCopilotOutput {
+  const rows = Array.isArray(input.cases) ? input.cases.filter(isRecord) : [];
+  const question = String(input.question ?? "").toLowerCase();
+  const needsAttention = rows.filter((row) => row.stage === "evidence-needed" || row.stage === "in-dispute");
+  const evidenceNeeded = rows.filter((row) => row.stage === "evidence-needed");
+  const recognised = rows.filter((row) => row.stage === "recognised" || row.stage === "closed");
+  const amount = (items: Record<string, unknown>[]) => `₦${(items.reduce((sum, row) => sum + Number(row.amountKobo ?? 0), 0) / 100).toLocaleString("en-NG", { maximumFractionDigits: 0 })}`;
+  const top = needsAttention.toSorted((a, b) => Number(b.amountKobo ?? 0) - Number(a.amountKobo ?? 0))[0];
+  const attachmentText = String(input.attachmentText ?? "").trim();
+  const attachmentName = String(input.attachmentName ?? "attachment");
+  let answer: string;
+  let suggestedAction = "Review the current recovery queue.";
+  if (attachmentText && /attach|file|document|summari|briefing|create/.test(question)) {
+    answer = `${attachmentName} was supplied with this question. Its readable text begins: “${attachmentText.slice(0, 280)}${attachmentText.length > 280 ? "…" : ""}”. This file has not been added to the recovery case records.`;
+    suggestedAction = "Review the attachment against the relevant case before relying on it.";
+  } else if (/evidence|receipt|missing/.test(question)) {
+    answer = evidenceNeeded.length
+      ? `${evidenceNeeded.length} ${evidenceNeeded.length === 1 ? "case needs" : "cases need"} evidence: ${evidenceNeeded.map((row) => String(row.customer ?? "Unknown customer")).join(", ")}. Their combined expected WHT is ${amount(evidenceNeeded)}.`
+      : "No current case is in the evidence-needed stage.";
+  } else if (/recognis|coverage|validated|complete/.test(question)) {
+    answer = `${recognised.length} ${recognised.length === 1 ? "case is" : "cases are"} recognised or closed, worth ${amount(recognised)}. ${needsAttention.length} still require intervention.`;
+  } else if (/attention|priority|urgent|exception|risk|briefing|summary/.test(question)) {
+    answer = top
+      ? `${needsAttention.length} ${needsAttention.length === 1 ? "case requires" : "cases require"} intervention, totalling ${amount(needsAttention)}. ${String(top.customer ?? "The largest case")} has the highest expected WHT at ${amount([top])}. Its recorded next action is: ${String(top.nextAction ?? "Review the case")}.`
+      : "No current case is marked as needing intervention.";
+    if (top) suggestedAction = String(top.nextAction ?? suggestedAction);
+  } else {
+    answer = `I can answer questions about the ${rows.length} current cases, their evidence gaps, recognised value, and priority exceptions. Ask about a specific customer or attach a text or CSV file.`;
+  }
+  return {
+    answer,
+    sourceLabels: ["portfolio.current", ...(attachmentText && /attach|file|document|summari|briefing|create/.test(question) ? ["attachment.text"] : [])],
+    limitations: ["Demo response uses synthetic portfolio records", ...(attachmentText ? ["Attached text is not persisted as evidence"] : []), ...(input.portfolioLimited ? ["This answer covers only the 500 most recently updated cases."] : [])],
+    suggestedAction,
+  };
+}
+
 function validateCopilot(value: unknown): CaseCopilotOutput {
   if (!isRecord(value)) throw new Error("Copilot response must be an object.");
   assertExactKeys(value, ["answer", "sourceLabels", "limitations", "suggestedAction"], "Copilot response");
@@ -315,6 +371,7 @@ export function getAiTaskDefinition(type: AiTaskType): AiTaskDefinition<GenericI
     communication_draft: { type, promptVersion: PROMPT_VERSION, systemPrompt: `${commonPrompt} Draft only from supplied case facts. Do not invent legal citations or deadlines. Mark the content AI-drafted and never send it.`, validateOutput: validateDraft, demoOutput: demoDraft, confidence: () => 90, sourceReferences: (input) => [{ type: "case_field", id: String(input.caseId ?? "case"), label: "Current case facts" }] },
     evidence_summary: { type, promptVersion: PROMPT_VERSION, systemPrompt: `${commonPrompt} Summarise supplied facts without changing deterministic values.`, validateOutput: validateEvidenceSummary, demoOutput: demoEvidenceSummary, confidence: () => 88, sourceReferences: (input) => [{ type: "case_field", id: String(input.caseId ?? "case"), label: "Evidence-pack facts" }] },
     portfolio_briefing: { type, promptVersion: PROMPT_VERSION, systemPrompt: `${commonPrompt} Write a briefing from supplied deterministic aggregates. Preserve counts and amounts exactly.`, validateOutput: validateBriefing, demoOutput: demoBriefing, confidence: () => 94, sourceReferences: () => [{ type: "aggregate", id: "portfolio-current", label: "Deterministic portfolio aggregates" }] },
+    portfolio_copilot: { type, promptVersion: "portfolio-copilot-2026-09-24.v1", systemPrompt: `${commonPrompt} Answer the latest portfolio question only from the supplied current cases and optional untrusted attachment text. Use recent conversation only to resolve references in the latest question; earlier answers are not factual evidence. Preserve amounts and statuses exactly. Cite only portfolio.current and attachment.text when used. Refuse requests to change records, make tax or legal conclusions, or send messages. State when the supplied facts are insufficient.`, validateOutput: validatePortfolioCopilot, demoOutput: demoPortfolioCopilot, confidence: () => 88, sourceReferences: (input) => [{ type: "aggregate", id: "portfolio-current", label: "Current scoped recovery portfolio" }, ...(input.attachmentText ? [{ type: "document" as const, id: String(input.attachmentName ?? "attachment"), label: "User-supplied text attachment, not stored as evidence" }] : [])] },
     case_copilot: { type, promptVersion: PROMPT_VERSION, systemPrompt: `${commonPrompt} Answer only from supplied case facts and label sources. Refuse unrelated, legal-conclusion, status-changing, sending or rule-changing requests.`, validateOutput: validateCopilot, demoOutput: demoCopilot, confidence: () => 90, sourceReferences: (input) => [{ type: "case_field", id: String(input.caseId ?? "case"), label: "Current case facts, evidence and deterministic checks" }] },
   };
   return definitions[type];

@@ -26,6 +26,7 @@ export async function runAiTask<TOutput>({
   clientId = "local-client",
   requestedByUserId,
   providerMode,
+  onProgress,
 }: {
   type: AiTaskType;
   input: Record<string, unknown>;
@@ -35,6 +36,7 @@ export async function runAiTask<TOutput>({
   clientId?: string;
   requestedByUserId?: string;
   providerMode?: string;
+  onProgress?: (phase: "provider" | "validation" | "recorded") => void | Promise<void>;
 }): Promise<AiTaskResult<TOutput>> {
   const config = getAiConfig();
   const provider = selectAiProvider({ mode: providerMode || config.mode, apiKey: config.apiKey, model: config.model });
@@ -46,13 +48,16 @@ export async function runAiTask<TOutput>({
   await db.insert(aiJobs).values({ id: jobId, workspaceId, clientId, caseId, documentId, taskType: type, status: "processing", provider: provider.name, model: provider.model, promptVersion: definition.promptVersion, inputHash, validationOutcome: "pending", requestedByUserId, idempotencyKey: `${workspaceId}:${clientId}:${type}:${inputHash}`, attemptCount: 1, createdAt });
   const started = Date.now();
   try {
+    await onProgress?.("provider");
     const raw = await provider.generateStructured(definition, input);
+    await onProgress?.("validation");
     const output = definition.validateOutput(raw.output, input);
     const latencyMs = Date.now() - started;
     const confidence = definition.confidence(output);
     const sourceReferences = definition.sourceReferences(input, output);
     const completedAt = new Date().toISOString();
     await db.update(aiJobs).set({ status: "completed", outputJson: JSON.stringify(output), confidence, sourceReferencesJson: JSON.stringify(sourceReferences), latencyMs, validationOutcome: "validated", completedAt }).where(eq(aiJobs.id, jobId));
+    await onProgress?.("recorded");
     return { jobId, status: "completed", provider: provider.name, model: provider.model, promptVersion: definition.promptVersion, output, confidence, sourceReferences, latencyMs, validationOutcome: "validated" };
   } catch (error) {
     const latencyMs = Date.now() - started;

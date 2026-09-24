@@ -14,6 +14,7 @@ export const aiTaskTypes = [
   "communication_draft",
   "evidence_summary",
   "portfolio_briefing",
+  "portfolio_copilot",
   "case_copilot",
 ] as const;
 
@@ -171,6 +172,12 @@ export type PortfolioBriefingOutput = {
   statements: Array<{ text: string; filter: string; caseIds: string[] }>;
   dataQualityWarning: string;
   sourceLabels: string[];
+};
+export type PortfolioCopilotOutput = {
+  answer: string;
+  sourceLabels: string[];
+  limitations: string[];
+  suggestedAction: string;
 };
 export type CaseCopilotOutput = {
   answer: string;
