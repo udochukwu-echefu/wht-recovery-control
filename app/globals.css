@@ -1492,6 +1492,11 @@ textarea:focus-visible,
 .ai-operational-summary .review-summary { min-width: 0; background: var(--overview-open); }
 :root[data-theme="light"] .ai-operational-summary > div:nth-child(2) { background: oklch(.95 .045 145); }
 :root[data-theme="light"] .ai-operational-summary .review-summary { background: oklch(.95 .055 86); }
+:root:not([data-theme="light"]) .ai-operational-summary > div:nth-child(2) strong,
+:root:not([data-theme="light"]) .ai-operational-summary .review-summary strong { color: #292b27; }
+:root:not([data-theme="light"]) .ai-operational-summary > div:nth-child(2) span,
+:root:not([data-theme="light"]) .ai-operational-summary .review-summary span { color: #565b50; }
+:root:not([data-theme="light"]) .ai-operational-summary .review-summary svg { color: #765400; }
 .ai-operational-summary strong { font-family: var(--font-geist-sans), Inter, sans-serif; font-size: 27px; line-height: 1; letter-spacing: -.04em; }
 .ai-operational-summary .review-summary strong { color: var(--ink); }
 .ai-operational-summary .review-summary svg { width: 16px; }
