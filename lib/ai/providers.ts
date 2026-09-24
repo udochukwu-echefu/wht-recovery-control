@@ -70,5 +70,5 @@ export function selectAiProvider({ mode, apiKey, model }: { mode: string; apiKey
   if (mode === "deepseek" && apiKey) return new DeepSeekAiProvider({ apiKey, model });
   if (mode === "deepseek" && !apiKey) return new ManualReviewProvider();
   if (mode === "demo") return new DemoAiProvider();
-  return apiKey ? new DeepSeekAiProvider({ apiKey, model }) : new DemoAiProvider();
+  return apiKey ? new DeepSeekAiProvider({ apiKey, model }) : new ManualReviewProvider();
 }

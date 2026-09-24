@@ -39,6 +39,7 @@ function hasExpectedSignature(bytes: Uint8Array, extension: string) {
 }
 
 export function validateUpload(file: File, bytes: ArrayBuffer) {
+  if (!file.name.trim() || file.name.length > 200 || /[\r\n\0]/.test(file.name)) throw new ApiError(400, "File name must contain 1 to 200 safe characters.");
   const extension = file.name.toLowerCase().split(".").pop() ?? "";
   const allowedMimes = MIME_BY_EXTENSION[extension];
   if (!allowedMimes) throw new ApiError(415, "Use CSV for ledgers, or TXT, PDF, PNG, JPEG, or WebP for evidence.");
@@ -56,8 +57,8 @@ export async function putStoredObject(context: RequestContext, file: File, bytes
   if (bytes.byteLength < 1 || bytes.byteLength > settings.max_file_bytes) throw new ApiError(413, `File must be between 1 byte and ${Math.floor(settings.max_file_bytes / 1_048_576)} MB.`);
 
   const sha256 = await sha256Hex(bytes);
-  const duplicate = await d1.prepare("SELECT id, file_name FROM evidence_documents WHERE workspace_id = ? AND sha256 = ? AND deleted_at IS NULL LIMIT 1")
-    .bind(context.workspace.id, sha256).first<{ id: string; file_name: string }>();
+  const duplicate = await d1.prepare("SELECT id, file_name FROM evidence_documents WHERE workspace_id = ? AND client_id = ? AND sha256 = ? AND deleted_at IS NULL LIMIT 1")
+    .bind(context.workspace.id, context.clientId, sha256).first<{ id: string; file_name: string }>();
   if (duplicate) throw new ApiError(409, `This file is already stored as ${duplicate.file_name}.`);
 
   const usage = await d1.prepare("SELECT COALESCE(SUM(size_bytes), 0) AS bytes FROM evidence_blobs WHERE workspace_id = ? AND deleted_at IS NULL")

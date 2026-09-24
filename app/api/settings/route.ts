@@ -1,6 +1,5 @@
 import { and, eq } from "drizzle-orm";
 import { getAiConfig, getD1, getDb } from "@/db";
-import { ensureSchema } from "@/db/ensure";
 import { clients, workspaceSettings, workspaces } from "@/db/schema";
 import { apiError, auditStatement, requireContext, workspaceRoles, type WorkspaceRole } from "@/lib/auth";
 
@@ -18,7 +17,6 @@ type MemberRow = {
 
 export async function GET(request: Request) {
   try {
-    await ensureSchema();
     const context = await requireContext(request);
     const db = getDb();
     const d1 = getD1();
@@ -51,7 +49,6 @@ export async function GET(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
-    await ensureSchema();
     const context = await requireContext(request, ["admin", "practitioner"]);
     const body = await request.json() as Record<string, unknown>;
     const section = String(body.section ?? "");

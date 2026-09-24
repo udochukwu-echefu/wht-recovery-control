@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { parseLedgerCsvWithMapping, previewLedgerCsv, validateLedgerMapping } from "../lib/csv.ts";
 import { buildCandidateFactors, evaluateReceiptMatchDetailed } from "../lib/matching.ts";
 import { getAiTaskDefinition } from "../lib/ai/definitions.ts";
-import { ManualReviewProvider } from "../lib/ai/providers.ts";
+import { DemoAiProvider, ManualReviewProvider, selectAiProvider } from "../lib/ai/providers.ts";
 
 const mappings = [
   ["Customer", "customer_name"], ["TIN", "customer_tin"], ["Invoice", "invoice_reference"],
@@ -49,6 +49,16 @@ test("strict AI validation rejects hallucinated fields and unknown candidate ids
   assert.throws(() => rankingDefinition.validateOutput({ candidates: [{ caseId: "invented", rank: 1, confidence: 99, reasons: [], conflicts: [] }], recommendation: "review_top_candidate", uncertainty: "" }, { candidates: [{ caseId: "real", factors: { score: 80, reasons: [], conflicts: [] } }] }), /unknown case/i);
 });
 
+test("receipt validation rejects duplicate, incomplete, and ungrounded extraction fields", () => {
+  const definition = getAiTaskDefinition("receipt_extraction");
+  const input = { documentText: "Receipt no: RCP-1" };
+  const valid = definition.demoOutput(input);
+  assert.throws(() => definition.validateOutput({ ...valid, fields: valid.fields.slice(1) }, input), /missing deducting_customer_name/i);
+  assert.throws(() => definition.validateOutput({ ...valid, fields: [...valid.fields, valid.fields[0]] }, input), /more than once/i);
+  const changed = valid.fields.map((field) => field.fieldName === "receipt_number" ? { ...field, sourceQuote: "This text is absent" } : field);
+  assert.throws(() => definition.validateOutput({ ...valid, fields: changed }, input), /not grounded/i);
+});
+
 test("ambiguous candidates remain unresolved and are never auto-attached", () => {
   const definition = getAiTaskDefinition("candidate_ranking");
   const result = definition.demoOutput({ candidates: [
@@ -74,6 +84,11 @@ test("candidate factors expose conflicts while deterministic rules own the outco
 test("manual provider fails safely into manual review", async () => {
   const provider = new ManualReviewProvider();
   await assert.rejects(provider.generateStructured(), (error) => error.code === "AI_MANUAL_REVIEW");
+});
+
+test("auto mode without a key fails safely instead of using demo fixtures for live data", () => {
+  assert.ok(selectAiProvider({ mode: "auto", apiKey: "", model: "unused" }) instanceof ManualReviewProvider);
+  assert.ok(selectAiProvider({ mode: "demo", apiKey: "", model: "unused" }) instanceof DemoAiProvider);
 });
 
 test("case copilot refuses unrelated or consequential requests", () => {

@@ -1,14 +1,14 @@
 import { and, desc, eq } from "drizzle-orm";
 import { getD1, getDb } from "@/db";
-import { ensureSchema } from "@/db/ensure";
 import { auditEvents, clients, evidenceDocuments, extractedFields, recoveryCases } from "@/db/schema";
+import { assertMachineOutcomeTransition, nextActionForRecoveryCase, reviewerStageTransition } from "@/lib/case-stage-policy";
 import { evaluateReceiptMatch, type ReceiptExtraction } from "@/lib/matching";
 import { apiError, requireContext, type RequestContext } from "@/lib/auth";
 import { getActiveRuleSet } from "@/lib/rules";
 
 export const runtime = "edge";
 
-const allowedActions = new Set(["review-extraction", "recognise", "close"]);
+const allowedActions = new Set(["review-extraction", "recognise"]);
 const permittedFields = new Set([
   "customer_name",
   "deducting_customer_tin",
@@ -21,7 +21,7 @@ const permittedFields = new Set([
 
 type ReviewPayload = {
   caseId: string;
-  action: "review-extraction" | "recognise" | "close";
+  action: "review-extraction" | "recognise";
   corrections?: Record<string, string>;
   note?: string;
 };
@@ -64,7 +64,11 @@ function koboFromText(value: string) {
 }
 
 async function loadCase(context: RequestContext, caseId: string) {
-  return (await getDb().select().from(recoveryCases).where(and(eq(recoveryCases.id, caseId), eq(recoveryCases.workspaceId, context.workspace.id))).limit(1))[0] ?? null;
+  return (await getDb().select().from(recoveryCases).where(and(
+    eq(recoveryCases.id, caseId),
+    eq(recoveryCases.workspaceId, context.workspace.id),
+    eq(recoveryCases.clientId, context.clientId),
+  )).limit(1))[0] ?? null;
 }
 
 export async function GET(request: Request) {
@@ -72,7 +76,6 @@ export async function GET(request: Request) {
   if (!caseId) return Response.json({ error: "caseId is required." }, { status: 400 });
 
   try {
-    await ensureSchema();
     const context = await requireContext(request);
     const recoveryCase = await loadCase(context, caseId);
     if (!recoveryCase) return Response.json({ error: "Case not found." }, { status: 404 });
@@ -89,7 +92,7 @@ export async function GET(request: Request) {
         aiModel: evidenceDocuments.aiModel,
         aiResponseId: evidenceDocuments.aiResponseId,
         createdAt: evidenceDocuments.createdAt,
-      }).from(evidenceDocuments).where(and(eq(evidenceDocuments.id, recoveryCase.sourceDocumentId), eq(evidenceDocuments.workspaceId, context.workspace.id))).limit(1),
+      }).from(evidenceDocuments).where(and(eq(evidenceDocuments.id, recoveryCase.sourceDocumentId), eq(evidenceDocuments.workspaceId, context.workspace.id), eq(evidenceDocuments.clientId, context.clientId))).limit(1),
       db.select().from(extractedFields).where(and(eq(extractedFields.documentId, recoveryCase.sourceDocumentId), eq(extractedFields.workspaceId, context.workspace.id))),
       db.select({ id: auditEvents.id, createdAt: auditEvents.createdAt, detailJson: auditEvents.detailJson })
         .from(auditEvents)
@@ -129,7 +132,6 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    await ensureSchema();
     const context = await requireContext(request, ["admin", "practitioner", "reviewer"]);
     const payload: unknown = await request.json();
     if (!isReviewPayload(payload) || !payload.caseId.trim()) {
@@ -140,6 +142,7 @@ export async function POST(request: Request) {
     if (!recoveryCase) return Response.json({ error: "Case not found." }, { status: 404 });
 
     if (payload.action === "review-extraction") {
+      reviewerStageTransition(recoveryCase.stage, "review-extraction");
       if (!recoveryCase.sourceDocumentId) return Response.json({ error: "No extracted receipt is linked to this case." }, { status: 409 });
       const fields = await getDb().select().from(extractedFields).where(and(eq(extractedFields.documentId, recoveryCase.sourceDocumentId), eq(extractedFields.workspaceId, context.workspace.id)));
       if (!fields.length) return Response.json({ error: "No extracted fields are available for review." }, { status: 409 });
@@ -185,6 +188,8 @@ export async function POST(request: Request) {
         reportingPeriod: recoveryCase.reportingPeriod,
         beneficiaryTin: client?.tin ?? "",
       }, { version: activeRules.version, amountToleranceKobo: activeRules.toleranceAmountKobo });
+      assertMachineOutcomeTransition(recoveryCase.stage, outcome.stage);
+      const nextAction = nextActionForRecoveryCase({ stage: outcome.stage, exceptionCode: outcome.exceptionCode, hasReceipt: true });
       const now = new Date().toISOString();
       const eventId = crypto.randomUUID();
       const d1 = getD1();
@@ -203,10 +208,10 @@ export async function POST(request: Request) {
           }), now),
         d1.prepare("INSERT INTO match_executions (id, workspace_id, case_id, document_id, rule_version, result_json, factors_json, conflicts_json, tolerance_json, created_at) VALUES (?, ?, ?, ?, ?, ?, '[]', '[]', ?, ?)")
           .bind(crypto.randomUUID(), context.workspace.id, recoveryCase.id, recoveryCase.sourceDocumentId, activeRules.version, JSON.stringify(outcome), JSON.stringify({ amountKobo: activeRules.toleranceAmountKobo }), now),
-        d1.prepare("UPDATE recovery_cases SET receipt_number = ?, receipt_amount_kobo = ?, receipt_beneficiary_tin = ?, stage = ?, exception_code = ?, confidence = ?, rule_version = ?, next_action = ?, updated_at = ? WHERE id = ? AND workspace_id = ?")
-          .bind(extraction.receiptNumber || null, extraction.whtAmountKobo, extraction.beneficiaryTin || null, outcome.stage, outcome.exceptionCode, outcome.confidence, activeRules.version, outcome.exceptionCode === "NO_OPEN_EXCEPTION" ? "Connect and verify authority record" : "Resolve receipt mismatch", now, recoveryCase.id, context.workspace.id),
-        d1.prepare("UPDATE receipt_records SET receipt_reference = ?, deducting_customer_tin = ?, beneficiary_tin = ?, amount_kobo = ?, reporting_period = ?, status = 'reviewed', extraction_reviewed_at = ?, extraction_reviewed_by = ? WHERE document_id = ? AND workspace_id = ?")
-          .bind(extraction.receiptNumber || null, extraction.deductingCustomerTin || null, extraction.beneficiaryTin || null, extraction.whtAmountKobo, extraction.reportingPeriod || null, now, context.user.id, recoveryCase.sourceDocumentId, context.workspace.id),
+        d1.prepare("UPDATE recovery_cases SET receipt_number = ?, receipt_amount_kobo = ?, receipt_beneficiary_tin = ?, stage = ?, exception_code = ?, confidence = ?, rule_version = ?, next_action = ?, updated_at = ? WHERE id = ? AND workspace_id = ? AND client_id = ?")
+          .bind(extraction.receiptNumber || null, extraction.whtAmountKobo, extraction.beneficiaryTin || null, outcome.stage, outcome.exceptionCode, outcome.confidence, activeRules.version, nextAction, now, recoveryCase.id, context.workspace.id, context.clientId),
+        d1.prepare("UPDATE receipt_records SET receipt_reference = ?, deducting_customer_tin = ?, beneficiary_tin = ?, amount_kobo = ?, reporting_period = ?, status = 'reviewed', extraction_reviewed_at = ?, extraction_reviewed_by = ? WHERE document_id = ? AND workspace_id = ? AND client_id = ?")
+          .bind(extraction.receiptNumber || null, extraction.deductingCustomerTin || null, extraction.beneficiaryTin || null, extraction.whtAmountKobo, extraction.reportingPeriod || null, now, context.user.id, recoveryCase.sourceDocumentId, context.workspace.id, context.clientId),
       ];
       await d1.batch(statements);
 
@@ -222,8 +227,11 @@ export async function POST(request: Request) {
     }
 
     if (payload.action === "recognise") {
+      const nextStage = reviewerStageTransition(recoveryCase.stage, "recognise");
+      const note = payload.note?.trim().slice(0, 500) ?? "";
+      if (note.length < 10) return Response.json({ error: "A recognition decision note of at least 10 characters is required." }, { status: 400 });
       if (!recoveryCase.sourceDocumentId) return Response.json({ error: "No reviewed receipt is linked to this case." }, { status: 409 });
-      const reviewEvent = await getDb().select({ id: auditEvents.id }).from(auditEvents)
+      const reviewEvent = await getDb().select({ id: auditEvents.id, createdAt: auditEvents.createdAt }).from(auditEvents)
         .where(and(
           eq(auditEvents.caseId, recoveryCase.id),
           eq(auditEvents.workspaceId, context.workspace.id),
@@ -232,30 +240,53 @@ export async function POST(request: Request) {
         ))
         .orderBy(desc(auditEvents.createdAt)).limit(1);
       if (!reviewEvent.length) return Response.json({ error: "Review the extracted fields and record the audit checkpoint before recognition." }, { status: 409 });
-      const authorityAllocation = await getD1().prepare("SELECT id FROM authority_allocations WHERE workspace_id = ? AND case_id = ? AND result_code IN ('matched', 'matched_within_tolerance') ORDER BY created_at DESC LIMIT 1")
-        .bind(context.workspace.id, recoveryCase.id).first<{ id: string }>();
-      if (!authorityAllocation) return Response.json({ error: "Recognition is blocked until an authority record is connected and verified." }, { status: 409 });
+      const d1 = getD1();
+      const [latestMatch, latestAuthority, latestApplicability, currentClient] = await Promise.all([
+        d1.prepare("SELECT id, document_id, rule_version, result_json, created_at FROM match_executions WHERE workspace_id = ? AND case_id = ? ORDER BY created_at DESC, id DESC LIMIT 1")
+          .bind(context.workspace.id, recoveryCase.id).first<{ id: string; document_id: string; rule_version: string; result_json: string; created_at: string }>(),
+        d1.prepare(`SELECT a.id, a.rule_version, a.result_code, a.match_execution_id, a.created_at, r.document_id AS receipt_document_id
+          FROM authority_allocations a
+          JOIN receipt_allocations ra ON ra.id = a.receipt_allocation_id AND ra.workspace_id = a.workspace_id
+          JOIN receipt_records r ON r.id = ra.receipt_id AND r.workspace_id = a.workspace_id
+          WHERE a.workspace_id = ? AND a.case_id = ?
+          ORDER BY a.created_at DESC, a.id DESC LIMIT 1`)
+          .bind(context.workspace.id, recoveryCase.id).first<{ id: string; rule_version: string; result_code: string; match_execution_id: string | null; created_at: string; receipt_document_id: string }>(),
+        d1.prepare("SELECT id, outcome, rule_version, created_at FROM applicability_reviews WHERE workspace_id = ? AND case_id = ? ORDER BY created_at DESC, id DESC LIMIT 1")
+          .bind(context.workspace.id, recoveryCase.id).first<{ id: string; outcome: string; rule_version: string; created_at: string }>(),
+        d1.prepare("SELECT tin FROM clients WHERE id = ? AND workspace_id = ? LIMIT 1")
+          .bind(context.clientId, context.workspace.id).first<{ tin: string }>(),
+      ]);
+      let matchResult: { exceptionCode?: unknown } = {};
+      try { matchResult = latestMatch ? JSON.parse(latestMatch.result_json) as { exceptionCode?: unknown } : {}; } catch { /* Invalid history fails the checks below. */ }
+      const matchedAuthority = latestAuthority && ["matched", "matched_within_tolerance"].includes(latestAuthority.result_code);
+      const currentDocumentMatched = latestMatch?.document_id === recoveryCase.sourceDocumentId && latestAuthority?.receipt_document_id === recoveryCase.sourceDocumentId;
+      const currentRuleMatched = latestMatch?.rule_version === recoveryCase.ruleVersion && latestAuthority?.rule_version === recoveryCase.ruleVersion && latestApplicability?.rule_version === recoveryCase.ruleVersion;
+      const freshAuthority = Boolean(latestMatch && latestAuthority?.match_execution_id === latestMatch.id);
+      const normaliseTin = (value: string | null | undefined) => (value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+      const currentBeneficiaryMatched = Boolean(currentClient?.tin && normaliseTin(currentClient.tin) === normaliseTin(recoveryCase.receiptBeneficiaryTin));
+      if (!latestMatch || matchResult.exceptionCode !== "NO_OPEN_EXCEPTION" || !currentDocumentMatched || !currentRuleMatched || !freshAuthority || !matchedAuthority || !currentBeneficiaryMatched) {
+        return Response.json({ error: "Recognition is blocked because the latest applicability, receipt match, client TIN, or authority reconciliation is stale. Re-run the affected review controls." }, { status: 409 });
+      }
+      if (!latestApplicability || latestApplicability.outcome !== "applicable") return Response.json({ error: "Recognition is blocked until the latest WHT applicability review is confirmed under the current rule version." }, { status: 409 });
       if (recoveryCase.applicabilityStatus !== "confirmed_applicable") return Response.json({ error: "Recognition is blocked until WHT applicability is confirmed." }, { status: 409 });
       if (recoveryCase.exceptionCode !== "NO_OPEN_EXCEPTION") {
         return Response.json({ error: "Recognition is blocked until deterministic matching has no open exception." }, { status: 409 });
       }
       const now = new Date().toISOString();
-      await getD1().batch([
-        getD1().prepare("INSERT INTO audit_events (id, workspace_id, case_id, document_id, event_type, actor, actor_user_id, actor_display_name, actor_role, detail_json, created_at) VALUES (?, ?, ?, ?, ?, 'user', ?, ?, ?, ?, ?)")
-          .bind(crypto.randomUUID(), context.workspace.id, recoveryCase.id, recoveryCase.sourceDocumentId, "REVIEW_DECISION", context.user.id, context.user.displayName, context.workspace.role, JSON.stringify({ stage: "recognised", reviewEventId: reviewEvent[0].id, authorityAllocationId: authorityAllocation.id, note: payload.note?.trim().slice(0, 500) ?? "" }), now),
-        getD1().prepare("UPDATE recovery_cases SET stage = ?, next_action = ?, updated_at = ? WHERE id = ? AND workspace_id = ?").bind("recognised", "Record utilisation when applied", now, recoveryCase.id, context.workspace.id),
+      const nextAction = nextActionForRecoveryCase({ stage: nextStage, exceptionCode: recoveryCase.exceptionCode, authorityConnected: true, hasReceipt: true });
+      const decisionId = crypto.randomUUID();
+      const recognitionResults = await d1.batch([
+        d1.prepare("UPDATE recovery_cases SET stage = ?, next_action = ?, updated_at = ? WHERE id = ? AND workspace_id = ? AND client_id = ? AND stage = 'matched' AND exception_code = 'NO_OPEN_EXCEPTION'")
+          .bind(nextStage, nextAction, now, recoveryCase.id, context.workspace.id, context.clientId),
+        d1.prepare(`INSERT INTO audit_events (id, workspace_id, case_id, document_id, event_type, actor, actor_user_id, actor_display_name, actor_role, detail_json, created_at)
+          SELECT ?, ?, ?, ?, ?, 'user', ?, ?, ?, ?, ?
+          WHERE EXISTS (SELECT 1 FROM recovery_cases WHERE id = ? AND workspace_id = ? AND client_id = ? AND stage = 'recognised' AND updated_at = ?)`)
+          .bind(decisionId, context.workspace.id, recoveryCase.id, recoveryCase.sourceDocumentId, "REVIEW_DECISION", context.user.id, context.user.displayName, context.workspace.role, JSON.stringify({ stage: nextStage, reviewEventId: reviewEvent[0].id, matchExecutionId: latestMatch.id, authorityAllocationId: latestAuthority.id, applicabilityReviewId: latestApplicability.id, ruleVersion: recoveryCase.ruleVersion, note }), now, recoveryCase.id, context.workspace.id, context.clientId, now),
       ]);
-      return Response.json({ caseId: recoveryCase.id, stage: "recognised", updatedAt: now });
+      if (!(recognitionResults[0].meta.changes ?? 0)) return Response.json({ error: "The case changed while recognition was being recorded. Reload it and review the latest controls." }, { status: 409 });
+      return Response.json({ caseId: recoveryCase.id, stage: nextStage, updatedAt: now });
     }
-
-    if (recoveryCase.stage !== "recognised") return Response.json({ error: "Only a recognised case can be closed as utilised." }, { status: 409 });
-    const now = new Date().toISOString();
-    await getD1().batch([
-      getD1().prepare("INSERT INTO audit_events (id, workspace_id, case_id, document_id, event_type, actor, actor_user_id, actor_display_name, actor_role, detail_json, created_at) VALUES (?, ?, ?, ?, ?, 'user', ?, ?, ?, ?, ?)")
-        .bind(crypto.randomUUID(), context.workspace.id, recoveryCase.id, recoveryCase.sourceDocumentId, "REVIEW_DECISION", context.user.id, context.user.displayName, context.workspace.role, JSON.stringify({ stage: "closed", note: payload.note?.trim().slice(0, 500) ?? "" }), now),
-      getD1().prepare("UPDATE recovery_cases SET stage = ?, next_action = NULL, updated_at = ? WHERE id = ? AND workspace_id = ?").bind("closed", now, recoveryCase.id, context.workspace.id),
-    ]);
-    return Response.json({ caseId: recoveryCase.id, stage: "closed", updatedAt: now });
+    return Response.json({ error: "Unsupported review action." }, { status: 400 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unexpected review error.";
     console.error(JSON.stringify({ message: "review failed", error: message }));

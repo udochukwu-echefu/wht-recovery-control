@@ -20,6 +20,7 @@ import {
   type ReceiptExtractionOutput,
   type RecoveryPlanOutput,
 } from "./contracts.ts";
+import { isMachineOutcomeStage } from "../case-stage-policy.ts";
 
 type GenericInput = Record<string, unknown>;
 const PROMPT_VERSION = "pilot-2026-08-11.v1";
@@ -111,19 +112,30 @@ function demoClassification(input: GenericInput): DocumentClassificationOutput {
 }
 
 const receiptFieldNames = ["deducting_customer_name", "deducting_customer_tin", "beneficiary_name", "beneficiary_tin", "invoice_reference", "receipt_number", "wht_amount", "gross_amount", "deduction_date", "reporting_period", "transaction_category", "issuing_authority"];
-function validateReceipt(value: unknown): ReceiptExtractionOutput {
+function validateReceipt(value: unknown, input: GenericInput): ReceiptExtractionOutput {
   if (!isRecord(value)) throw new Error("Receipt extraction must be an object.");
   assertExactKeys(value, ["fields", "overallConfidence", "untrustedInstructionsDetected"], "Receipt extraction");
+  const documentText = String(input.documentText ?? "").slice(0, 50_000);
+  const normaliseSource = (text: string) => text.toLowerCase().replace(/\s+/g, " ").trim();
+  const normalisedDocument = normaliseSource(documentText);
   const fields = asRecordArray(value.fields, "fields").map((item) => {
     assertExactKeys(item, ["fieldName", "value", "normalisedValue", "confidence", "sourceQuote", "pageNumber", "boundingBox", "warnings"], "Receipt field");
     const fieldName = stringValue(item.fieldName, "fieldName", 80);
     if (!receiptFieldNames.includes(fieldName)) throw new Error(`Receipt field ${fieldName} is not allowed.`);
     if (item.pageNumber !== null && (!Number.isInteger(item.pageNumber) || Number(item.pageNumber) < 1)) throw new Error("Receipt page number is invalid.");
     if (item.boundingBox !== null) throw new Error("Bounding boxes are not supported in this pilot.");
-    return { fieldName, value: stringValue(item.value, "value", 500), normalisedValue: stringValue(item.normalisedValue, "normalisedValue", 500), confidence: boundedConfidence(item.confidence), sourceQuote: stringValue(item.sourceQuote, "sourceQuote", 500), pageNumber: item.pageNumber as number | null, boundingBox: null, warnings: stringArray(item.warnings, "warnings", 10) };
+    const fieldValue = stringValue(item.value, "value", 500);
+    const sourceQuote = stringValue(item.sourceQuote, "sourceQuote", 500);
+    if (fieldValue && (!sourceQuote || !normalisedDocument.includes(normaliseSource(sourceQuote)))) throw new Error(`Receipt field ${fieldName} is not grounded in an exact source quote.`);
+    return { fieldName, value: fieldValue, normalisedValue: fieldValue.toLowerCase().replace(/[^a-z0-9.]/g, ""), confidence: boundedConfidence(item.confidence), sourceQuote, pageNumber: item.pageNumber as number | null, boundingBox: null, warnings: stringArray(item.warnings, "warnings", 10) };
   });
+  const returnedNames = fields.map((field) => field.fieldName);
+  const duplicateName = returnedNames.find((name, index) => returnedNames.indexOf(name) !== index);
+  if (duplicateName) throw new Error(`Receipt field ${duplicateName} was returned more than once.`);
+  const missingName = receiptFieldNames.find((name) => !returnedNames.includes(name));
+  if (missingName) throw new Error(`Receipt extraction is missing ${missingName}.`);
   if (typeof value.untrustedInstructionsDetected !== "boolean") throw new Error("untrustedInstructionsDetected must be boolean.");
-  return { fields, overallConfidence: boundedConfidence(value.overallConfidence, "overallConfidence"), untrustedInstructionsDetected: value.untrustedInstructionsDetected };
+  return { fields, overallConfidence: boundedConfidence(value.overallConfidence, "overallConfidence"), untrustedInstructionsDetected: value.untrustedInstructionsDetected || untrustedPattern.test(documentText) };
 }
 
 const extractLabel = (text: string, patterns: RegExp[]) => patterns.map((pattern) => text.match(pattern)?.[1]?.trim()).find(Boolean) ?? "";
@@ -163,6 +175,10 @@ function validateRanking(value: unknown, input: GenericInput): CandidateRankingO
     if (!Number.isInteger(item.rank) || Number(item.rank) < 1 || Number(item.rank) > 3) throw new Error("Candidate rank is invalid.");
     return { caseId, rank: Number(item.rank), confidence: boundedConfidence(item.confidence), reasons: stringArray(item.reasons, "reasons", 8), conflicts: stringArray(item.conflicts, "conflicts", 8) };
   });
+  const duplicateCandidate = candidates.find((candidate, index) => candidates.findIndex((item) => item.caseId === candidate.caseId) !== index);
+  if (duplicateCandidate) throw new Error(`Ranking returned candidate ${duplicateCandidate.caseId} more than once.`);
+  const duplicateRank = candidates.find((candidate, index) => candidates.findIndex((item) => item.rank === candidate.rank) !== index);
+  if (duplicateRank) throw new Error(`Ranking returned rank ${duplicateRank.rank} more than once.`);
   const recommendation = stringValue(value.recommendation, "recommendation", 40);
   if (!(["review_top_candidate", "manual_review", "unresolved"] as string[]).includes(recommendation)) throw new Error("Ranking recommendation is invalid.");
   return { candidates, recommendation: recommendation as CandidateRankingOutput["recommendation"], uncertainty: stringValue(value.uncertainty, "uncertainty", 600) };
@@ -224,7 +240,7 @@ function validateRecoveryPlan(value: unknown, input: GenericInput): RecoveryPlan
   const priority = stringValue(value.suggestedPriority, "suggestedPriority", 40);
   const expected = stringValue(value.expectedNextStatus, "expectedNextStatus", 40);
   if (!(["urgent", "high", "standard", "practitioner-sensitive"] as string[]).includes(priority)) throw new Error("Recovery priority is invalid.");
-  if (!(["evidence-needed", "matched", "in-dispute"] as string[]).includes(expected)) throw new Error("AI cannot propose a consequential final status.");
+  if (!isMachineOutcomeStage(expected) || expected === "detected") throw new Error("AI cannot propose a consequential final status.");
   const due = Number(value.suggestedDueInDays); const escalation = Number(value.escalationInDays);
   if (!Number.isInteger(due) || due < 1 || due > 60 || !Number.isInteger(escalation) || escalation < due || escalation > 90) throw new Error("Recovery plan dates are invalid.");
   return { caseId, recommendedAction: stringValue(value.recommendedAction, "recommendedAction", 400), evidenceChecklist: checklist, suggestedOwnerRole: stringValue(value.suggestedOwnerRole, "suggestedOwnerRole", 100), suggestedPriority: priority as RecoveryPlanOutput["suggestedPriority"], priorityReasons: stringArray(value.priorityReasons, "priorityReasons", 8), suggestedDueInDays: due, escalationInDays: escalation, expectedNextStatus: expected as RecoveryPlanOutput["expectedNextStatus"], practitionerQuestions: stringArray(value.practitionerQuestions, "practitionerQuestions", 8), uncertainty: stringValue(value.uncertainty, "uncertainty", 500), draftCommunicationType: stringValue(value.draftCommunicationType, "draftCommunicationType", 80) };

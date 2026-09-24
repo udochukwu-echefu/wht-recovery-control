@@ -1,11 +1,9 @@
-import { ensureSchema } from "@/db/ensure";
 import { apiError, requireContext } from "@/lib/auth";
 
 export const runtime = "edge";
 
 export async function GET(request: Request) {
   try {
-    await ensureSchema();
     const context = await requireContext(request);
     return Response.json({
       user: { id: context.user.id, email: context.user.email, displayName: context.user.displayName },

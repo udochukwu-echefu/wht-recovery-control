@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
-import { getDb } from "@/db";
-import { ensureSchema } from "@/db/ensure";
-import { candidateMatches, clients, evidenceDocuments, extractedFields, matchExecutions, receiptAllocations, receiptRecords, recoveryCases } from "@/db/schema";
+import { getD1, getDb } from "@/db";
+import { candidateMatches, clients, evidenceDocuments, extractedFields, receiptRecords, recoveryCases } from "@/db/schema";
+import { assertMachineOutcomeTransition, isTerminalRecoveryCaseStage, nextActionForRecoveryCase, projectRecoveryCaseStage } from "@/lib/case-stage-policy";
 import { runAiTask } from "@/lib/ai/service";
 import type { ExceptionExplanationOutput } from "@/lib/ai/contracts";
 import { evaluateReceiptMatchDetailed, type ReceiptExtraction } from "@/lib/matching";
@@ -12,7 +12,6 @@ export const runtime = "edge";
 
 export async function POST(request: Request) {
   try {
-    await ensureSchema();
     const context = await requireContext(request, ["admin", "practitioner", "reviewer"]);
     const body = await request.json() as { documentId?: unknown; caseId?: unknown; note?: unknown };
     const documentId = typeof body.documentId === "string" ? body.documentId.trim() : "";
@@ -20,13 +19,15 @@ export async function POST(request: Request) {
     const note = typeof body.note === "string" ? body.note.trim() : "";
     if (!documentId || !caseId || note.length < 8) return Response.json({ error: "Select a case and record a review note of at least 8 characters." }, { status: 400 });
     const db = getDb();
-    const document = (await db.select().from(evidenceDocuments).where(and(eq(evidenceDocuments.id, documentId), eq(evidenceDocuments.workspaceId, context.workspace.id))).limit(1))[0];
-    const recoveryCase = (await db.select().from(recoveryCases).where(and(eq(recoveryCases.id, caseId), eq(recoveryCases.workspaceId, context.workspace.id))).limit(1))[0];
+    const document = (await db.select().from(evidenceDocuments).where(and(eq(evidenceDocuments.id, documentId), eq(evidenceDocuments.workspaceId, context.workspace.id), eq(evidenceDocuments.clientId, context.clientId))).limit(1))[0];
+    const recoveryCase = (await db.select().from(recoveryCases).where(and(eq(recoveryCases.id, caseId), eq(recoveryCases.workspaceId, context.workspace.id), eq(recoveryCases.clientId, context.clientId))).limit(1))[0];
     if (!document || !recoveryCase) return Response.json({ error: "The document or recovery case was not found." }, { status: 404 });
-    if (["recognised", "closed"].includes(recoveryCase.stage)) return Response.json({ error: "Evidence cannot be attached to a recognised or closed case." }, { status: 409 });
+    if (isTerminalRecoveryCaseStage(projectRecoveryCaseStage(recoveryCase.stage)) || recoveryCase.stage === "recognised") return Response.json({ error: "Evidence cannot be attached after recognition or a terminal outcome." }, { status: 409 });
     const candidate = (await db.select().from(candidateMatches).where(and(eq(candidateMatches.workspaceId, context.workspace.id), eq(candidateMatches.documentId, documentId), eq(candidateMatches.caseId, caseId))).limit(1))[0];
-    if (!candidate) return Response.json({ error: "The selected case is not in the reviewed candidate set." }, { status: 409 });
-    const fields = await db.select().from(extractedFields).where(eq(extractedFields.documentId, documentId));
+    if (!candidate || candidate.status !== "suggested") return Response.json({ error: "The selected case is not an open candidate for this document." }, { status: 409 });
+    const existingReceipt = await db.select({ id: receiptRecords.id }).from(receiptRecords).where(and(eq(receiptRecords.workspaceId, context.workspace.id), eq(receiptRecords.documentId, documentId))).limit(1);
+    if (existingReceipt.length) return Response.json({ error: "This document has already been confirmed as a receipt. Allocate the existing receipt instead of confirming it again." }, { status: 409 });
+    const fields = await db.select().from(extractedFields).where(and(eq(extractedFields.documentId, documentId), eq(extractedFields.workspaceId, context.workspace.id)));
     const effective = Object.fromEntries(fields.map((field) => [field.fieldName, field.reviewedValue ?? field.extractedValue]));
     const parseAmount = (value: string) => {
       const number = Number(value.replace(/[^0-9.]/g, ""));
@@ -45,27 +46,34 @@ export async function POST(request: Request) {
     const ruleSet = await getActiveRuleSet(context, recoveryCase.businessDate ?? undefined);
     const client = (await db.select({ tin: clients.tin }).from(clients).where(and(eq(clients.id, context.clientId), eq(clients.workspaceId, context.workspace.id))).limit(1))[0];
     const deterministic = evaluateReceiptMatchDetailed(receipt, { ...recoveryCase, beneficiaryTin: client?.tin ?? "" }, { version: ruleSet.version, amountToleranceKobo: ruleSet.toleranceAmountKobo });
+    assertMachineOutcomeTransition(recoveryCase.stage, deterministic.stage);
+    const nextAction = nextActionForRecoveryCase({ stage: deterministic.stage, exceptionCode: deterministic.exceptionCode, hasReceipt: true });
     const now = new Date().toISOString();
     const matchId = crypto.randomUUID();
     const receiptId = crypto.randomUUID();
-    await db.update(candidateMatches).set({ status: "rejected" }).where(and(eq(candidateMatches.workspaceId, context.workspace.id), eq(candidateMatches.documentId, documentId)));
-    await db.update(candidateMatches).set({ status: "confirmed" }).where(eq(candidateMatches.id, candidate.id));
-    await auditStatement(context, { caseId, documentId, eventType: "CANDIDATE_CONFIRMED", detail: { candidateId: candidate.id, note, confirmedAt: now, rankingWasAdvisory: true } }).run();
-    await db.insert(matchExecutions).values({ id: matchId, workspaceId: context.workspace.id, caseId, documentId, ruleVersion: deterministic.ruleVersion, resultJson: JSON.stringify(deterministic), factorsJson: candidate.reasonsJson, conflictsJson: candidate.conflictsJson, toleranceJson: JSON.stringify({ amountKobo: ruleSet.toleranceAmountKobo }) });
-    await db.insert(receiptRecords).values({
-      id: receiptId, workspaceId: context.workspace.id, clientId: context.clientId, documentId,
-      receiptReference: receipt.receiptNumber || null, deductingCustomerTin: effective.deducting_customer_tin || null,
-      beneficiaryTin: receipt.beneficiaryTin || null, amountKobo: receipt.whtAmountKobo,
-      reportingPeriod: receipt.reportingPeriod || null, receiptDate: effective.deduction_date || null,
-      status: "review_required",
-    });
-    await db.insert(receiptAllocations).values({ id: crypto.randomUUID(), workspaceId: context.workspace.id, receiptId, caseId, amountKobo: receipt.whtAmountKobo ?? recoveryCase.expectedWhtKobo, status: "provisional", confirmedByUserId: context.user.id });
-    await db.update(recoveryCases).set({ receiptNumber: receipt.receiptNumber || null, receiptAmountKobo: receipt.whtAmountKobo, receiptBeneficiaryTin: receipt.beneficiaryTin || null, sourceDocumentId: documentId, stage: deterministic.stage, exceptionCode: deterministic.exceptionCode, confidence: deterministic.confidence, updatedAt: now }).where(eq(recoveryCases.id, caseId));
-    await db.update(evidenceDocuments).set({ status: "ready_for_field_review" }).where(eq(evidenceDocuments.id, documentId));
-    await auditStatement(context, { caseId, documentId, eventType: "DETERMINISTIC_MATCH_COMPLETED", actor: "system", detail: { matchId, ...deterministic } }).run();
+    const receiptAllocationId = crypto.randomUUID();
+    const d1 = getD1();
+    await d1.batch([
+      d1.prepare("UPDATE candidate_matches SET status = 'rejected' WHERE workspace_id = ? AND document_id = ? AND status = 'suggested'")
+        .bind(context.workspace.id, documentId),
+      d1.prepare("UPDATE candidate_matches SET status = 'confirmed' WHERE id = ? AND workspace_id = ? AND document_id = ? AND case_id = ?")
+        .bind(candidate.id, context.workspace.id, documentId, caseId),
+      auditStatement(context, { caseId, documentId, eventType: "CANDIDATE_CONFIRMED", detail: { candidateId: candidate.id, note, confirmedAt: now, rankingWasAdvisory: true } }),
+      d1.prepare("INSERT INTO match_executions (id, workspace_id, case_id, document_id, rule_version, result_json, factors_json, conflicts_json, tolerance_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .bind(matchId, context.workspace.id, caseId, documentId, deterministic.ruleVersion, JSON.stringify(deterministic), candidate.reasonsJson, candidate.conflictsJson, JSON.stringify({ amountKobo: ruleSet.toleranceAmountKobo }), now),
+      d1.prepare("INSERT INTO receipt_records (id, workspace_id, client_id, document_id, receipt_reference, deducting_customer_tin, beneficiary_tin, amount_kobo, reporting_period, receipt_date, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'review_required', ?)")
+        .bind(receiptId, context.workspace.id, context.clientId, documentId, receipt.receiptNumber || null, effective.deducting_customer_tin || null, receipt.beneficiaryTin || null, receipt.whtAmountKobo, receipt.reportingPeriod || null, effective.deduction_date || null, now),
+      d1.prepare("INSERT INTO receipt_allocations (id, workspace_id, receipt_id, case_id, amount_kobo, status, confirmed_by_user_id, created_at) VALUES (?, ?, ?, ?, ?, 'provisional', ?, ?)")
+        .bind(receiptAllocationId, context.workspace.id, receiptId, caseId, receipt.whtAmountKobo ?? recoveryCase.expectedWhtKobo, context.user.id, now),
+      d1.prepare("UPDATE recovery_cases SET receipt_number = ?, receipt_amount_kobo = ?, receipt_beneficiary_tin = ?, source_document_id = ?, stage = ?, exception_code = ?, confidence = ?, next_action = ?, updated_at = ? WHERE id = ? AND workspace_id = ? AND client_id = ?")
+        .bind(receipt.receiptNumber || null, receipt.whtAmountKobo, receipt.beneficiaryTin || null, documentId, deterministic.stage, deterministic.exceptionCode, deterministic.confidence, nextAction, now, caseId, context.workspace.id, context.clientId),
+      d1.prepare("UPDATE evidence_documents SET status = 'ready_for_field_review' WHERE id = ? AND workspace_id = ? AND client_id = ?")
+        .bind(documentId, context.workspace.id, context.clientId),
+      auditStatement(context, { caseId, documentId, eventType: "DETERMINISTIC_MATCH_COMPLETED", actor: "system", detail: { matchId, receiptId, receiptAllocationId, ...deterministic } }),
+    ]);
     const failedChecks = deterministic.checks.filter((check) => check.outcome === "fail").map((check) => check.label);
     const missingChecks = deterministic.checks.filter((check) => check.outcome === "missing").map((check) => check.label);
-    const explanation = await runAiTask<ExceptionExplanationOutput>({ type: "exception_explanation", caseId, documentId, workspaceId: context.workspace.id, requestedByUserId: context.user.id, input: { caseId, documentId, ruleVersion: deterministic.ruleVersion, exceptionCode: deterministic.exceptionCode, failedChecks, missingChecks, checks: deterministic.checks } });
+    const explanation = await runAiTask<ExceptionExplanationOutput>({ type: "exception_explanation", caseId, documentId, workspaceId: context.workspace.id, clientId: context.clientId, requestedByUserId: context.user.id, input: { caseId, documentId, ruleVersion: deterministic.ruleVersion, exceptionCode: deterministic.exceptionCode, failedChecks, missingChecks, checks: deterministic.checks } });
     return Response.json({ caseId, documentId, receiptId, matchId, deterministic, explanation: explanation.output, ai: { jobId: explanation.jobId, provider: explanation.provider, model: explanation.model, promptVersion: explanation.promptVersion } });
   } catch (error) {
     return apiError(error, "The evidence confirmation could not be completed.");

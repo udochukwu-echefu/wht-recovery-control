@@ -1,6 +1,5 @@
 import { eq } from "drizzle-orm";
 import { getAiConfig, getDb } from "@/db";
-import { ensureSchema } from "@/db/ensure";
 import { aiJobs } from "@/db/schema";
 import type { AiTaskDefinition, AiTaskResult, AiTaskType } from "./contracts.ts";
 import { getAiTaskDefinition } from "./definitions.ts";
@@ -24,6 +23,7 @@ export async function runAiTask<TOutput>({
   caseId,
   documentId,
   workspaceId = "pilot-workspace",
+  clientId = "local-client",
   requestedByUserId,
   providerMode,
 }: {
@@ -32,10 +32,10 @@ export async function runAiTask<TOutput>({
   caseId?: string;
   documentId?: string;
   workspaceId?: string;
+  clientId?: string;
   requestedByUserId?: string;
   providerMode?: string;
 }): Promise<AiTaskResult<TOutput>> {
-  await ensureSchema();
   const config = getAiConfig();
   const provider = selectAiProvider({ mode: providerMode || config.mode, apiKey: config.apiKey, model: config.model });
   const definition = getAiTaskDefinition(type) as AiTaskDefinition<Record<string, unknown>, TOutput>;
@@ -43,7 +43,7 @@ export async function runAiTask<TOutput>({
   const inputHash = await hashStructuredInput(input);
   const createdAt = new Date().toISOString();
   const db = getDb();
-  await db.insert(aiJobs).values({ id: jobId, workspaceId, caseId, documentId, taskType: type, status: "processing", provider: provider.name, model: provider.model, promptVersion: definition.promptVersion, inputHash, validationOutcome: "pending", requestedByUserId, idempotencyKey: `${workspaceId}:${type}:${inputHash}`, attemptCount: 1, createdAt });
+  await db.insert(aiJobs).values({ id: jobId, workspaceId, clientId, caseId, documentId, taskType: type, status: "processing", provider: provider.name, model: provider.model, promptVersion: definition.promptVersion, inputHash, validationOutcome: "pending", requestedByUserId, idempotencyKey: `${workspaceId}:${clientId}:${type}:${inputHash}`, attemptCount: 1, createdAt });
   const started = Date.now();
   try {
     const raw = await provider.generateStructured(definition, input);

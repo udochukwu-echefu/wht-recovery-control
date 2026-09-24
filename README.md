@@ -31,9 +31,10 @@ DEEPSEEK_MODEL=deepseek-v4-flash
 AI_PROVIDER=auto
 ```
 
-`AI_PROVIDER=auto` uses DeepSeek when configured and otherwise uses deterministic fixtures. `demo` forces fixtures; `manual` forces the reviewed manual fallback; `deepseek` requires the managed provider. Provider/model details appear only in AI activity and audit details.
+`AI_PROVIDER=auto` uses DeepSeek when configured and otherwise fails safely to reviewed manual entry. `demo` explicitly enables deterministic fixtures for synthetic walkthroughs; `manual` forces the reviewed manual fallback; `deepseek` requires the managed provider. Live records never silently use demo fixtures. Provider/model details appear only in AI activity and audit details.
 
 Production identity is derived from trusted `oai-authenticated-user-*` proxy headers. Production requests without an identity fail closed. Localhost receives an isolated local-development account so the live workflow can be tested without an identity proxy.
+Identity bootstrap records are created only on first use; normal authenticated requests perform membership resolution without rewriting bootstrap rows.
 
 ## Controlled workflow
 
@@ -44,10 +45,29 @@ Production identity is derived from trusted `oai-authenticated-user-*` proxy hea
 5. Upload a receipt original. D1 storage enforces workspace quota, per-file size, SHA-256 duplicate detection, MIME/extension/signature checks and retention metadata.
 6. Review source-grounded extraction fields and provenance. Permitted corrections require a note; the audit event and match execution are written before state changes.
 7. Confirm a candidate and run deterministic receipt matching under the active approved rule version.
-8. Import/review authority records and reconcile beneficiary TIN, deductor TIN, period, amount tolerance and credit status.
+8. Import/review authority records and reconcile beneficiary TIN, deductor TIN, period, amount tolerance and available credit status against the exact latest reviewed match execution.
 9. Recognise only after applicability, extraction review, receipt matching and authority reconciliation all pass.
 10. Record utilisation, write-off or non-recoverable outcomes through role-controlled operations. Utilisation requires evidence.
 11. Export an immutable, hash-addressed JSON audit pack or query portfolio/ageing/outcome reports.
+
+## Repository layout
+
+- `app/` owns route entry points, global styles and the application layout. The home page delegates to the recovery workspace.
+- `features/recovery/` owns the recovery UI. `workspace.tsx` coordinates navigation and workflow state; individual views cover intake, case review, rules, settings and AI activity. Shared view types, presentation helpers and demo records have separate modules.
+- `lib/` owns deterministic ledger validation, receipt matching, stage policy, authentication and storage. `lib/ledger-fields.ts` defines the canonical ledger fields shared by validation, AI contracts and the UI.
+- `lib/ai/` owns provider selection, task contracts, output validation and job persistence.
+- `db/` defines the database adapter and typed schema; `drizzle/` contains the authoritative migration history.
+- `tests/` covers domain behavior, backend control contracts, migrations and server rendering. `tests/fixtures/` holds synthetic input files.
+- `worker/` owns the Cloudflare request boundary; `docs/` records implementation coverage and audit findings.
+
+Keep database and provider code out of UI modules. Add changes to the relevant feature or domain module instead of expanding the route entry point. Ledger amounts must be decimal naira with at most two fractional digits; blank required amounts, malformed supplied WHT, duplicate mappings and inconsistent CSV columns fail validation.
+
+## Architecture controls
+
+- `lib/case-stage-policy.ts` is the single authority for recovery-case stages. Deterministic outcomes, reviewer transitions, terminal outcomes, invalid stored-state projection, labels and default next actions all resolve through this module.
+- Unknown stored stage values are surfaced as an invalid case state and fail safe; they are never silently projected as newly detected cases.
+- `drizzle/*.sql` is the sole database schema authority. Runtime routes do not create, alter or preflight tables.
+- Local development and tests apply pending migrations before the application runs. `npm run deploy` builds first, applies remote D1 migrations through the `DB` binding, and deploys only after migration success.
 
 ## Data and security model
 
@@ -59,6 +79,7 @@ Production identity is derived from trusted `oai-authenticated-user-*` proxy hea
 - Authenticated document download; administrator-only soft deletion
 - A live Settings workspace for client identity, evidence limits, retention, member roles, AI availability and appearance; every material settings change is role-controlled and audited
 - D1 BLOB adapter (`put`, `get`, metadata/hash verification, soft delete) with 1 MB default file and 25 MB default workspace quotas
+- Zero-cost synchronous processing limits ledger imports to 4 rows and authority imports to 15 records per request so the full transaction stays within the D1 free-tier query budget; larger files must be split until resumable background imports are implemented
 - Security headers and no-store API responses at the Worker boundary
 - No autonomous tax conclusion, authority submission, outbound message, recognition, utilisation, closure or write-off
 
@@ -81,7 +102,7 @@ npm run db:migrate:local
 npm run db:migrate:remote
 ```
 
-Do not apply remote migrations or deploy without reviewing the target account, approved rules, identity-proxy configuration, retention policy and a database backup/export.
+Do not apply remote migrations or deploy without reviewing the target account, approved rules, identity-proxy configuration, retention policy and a database backup/export. Before migration `0005`, check for duplicate successful authority/receipt allocations, multiple outcomes for one case, duplicate source identities, and authority allocations above the original credit balance; the new constraints intentionally reject those states.
 
 ## Current limitations
 

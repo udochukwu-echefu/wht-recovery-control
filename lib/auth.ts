@@ -1,4 +1,5 @@
 import { getD1 } from "@/db";
+import { CaseStagePolicyError } from "@/lib/case-stage-policy";
 
 export const workspaceRoles = ["admin", "practitioner", "reviewer", "analyst", "read_only"] as const;
 export type WorkspaceRole = (typeof workspaceRoles)[number];
@@ -65,34 +66,38 @@ export async function requireContext(request: Request, allowedRoles: readonly Wo
   const bootstrapClientId = `client_${suffix}`;
   const db = getD1();
   const now = new Date().toISOString();
-
-  await db.batch([
-    db.prepare("INSERT INTO users (id, provider_subject, email, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?) ON CONFLICT(provider_subject) DO UPDATE SET email = excluded.email, display_name = excluded.display_name, updated_at = excluded.updated_at")
-      .bind(userId, providerSubject, email || "unknown@example.invalid", displayName || email || "WHT practitioner", now, now),
-    db.prepare("INSERT OR IGNORE INTO workspaces (id, name, slug, mode, created_at) VALUES (?, ?, ?, 'live', ?)")
-      .bind(bootstrapWorkspaceId, localDevelopment ? "Local WHT workspace" : `${displayName || "My"} workspace`, `workspace-${suffix}`, now),
-    db.prepare("INSERT OR IGNORE INTO workspace_memberships (id, workspace_id, user_id, role, status, created_at) VALUES (?, ?, ?, 'admin', 'active', ?)")
-      .bind(`member_${suffix}`, bootstrapWorkspaceId, userId, now),
-    db.prepare("INSERT OR IGNORE INTO clients (id, workspace_id, name, legal_name, entity_type, jurisdiction, tin, status, created_at) VALUES (?, ?, 'Default client', 'Default client', 'company', 'federal', '', 'active', ?)")
-      .bind(bootstrapClientId, bootstrapWorkspaceId, now),
-    db.prepare("INSERT OR IGNORE INTO workspace_settings (workspace_id, max_file_bytes, max_storage_bytes, retention_days, default_client_id, updated_at) VALUES (?, 1048576, 25000000, 365, ?, ?)")
-      .bind(bootstrapWorkspaceId, bootstrapClientId, now),
-  ]);
-
   const requestedWorkspace = header(request, "x-wht-workspace");
-  const membership = await db.prepare(`
+  const loadMembership = () => db.prepare(`
     SELECT u.id AS user_id, u.provider_subject, u.email, u.display_name,
            w.id AS workspace_id, w.name AS workspace_name, m.role,
-           s.default_client_id
+           c.id AS default_client_id
     FROM users u
     JOIN workspace_memberships m ON m.user_id = u.id AND m.status = 'active'
     JOIN workspaces w ON w.id = m.workspace_id
     LEFT JOIN workspace_settings s ON s.workspace_id = w.id
+    LEFT JOIN clients c ON c.id = s.default_client_id AND c.workspace_id = w.id AND c.status = 'active'
     WHERE u.provider_subject = ? AND u.status = 'active'
       AND (? = '' OR w.id = ?)
     ORDER BY m.created_at ASC
     LIMIT 1
   `).bind(providerSubject, requestedWorkspace, requestedWorkspace).first<MembershipRow>();
+  let membership = await loadMembership();
+
+  if (!membership && !requestedWorkspace) {
+    await db.batch([
+      db.prepare("INSERT OR IGNORE INTO users (id, provider_subject, email, display_name, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?)")
+        .bind(userId, providerSubject, email || "unknown@example.invalid", displayName || email || "WHT practitioner", now, now),
+      db.prepare("INSERT OR IGNORE INTO workspaces (id, name, slug, mode, created_at) VALUES (?, ?, ?, 'live', ?)")
+        .bind(bootstrapWorkspaceId, localDevelopment ? "Local WHT workspace" : `${displayName || "My"} workspace`, `workspace-${suffix}`, now),
+      db.prepare("INSERT OR IGNORE INTO workspace_memberships (id, workspace_id, user_id, role, status, created_at) VALUES (?, ?, ?, 'admin', 'active', ?)")
+        .bind(`member_${suffix}`, bootstrapWorkspaceId, userId, now),
+      db.prepare("INSERT OR IGNORE INTO clients (id, workspace_id, name, legal_name, entity_type, jurisdiction, tin, status, created_at) VALUES (?, ?, 'Default client', 'Default client', 'company', 'federal', '', 'active', ?)")
+        .bind(bootstrapClientId, bootstrapWorkspaceId, now),
+      db.prepare("INSERT OR IGNORE INTO workspace_settings (workspace_id, max_file_bytes, max_storage_bytes, retention_days, default_client_id, updated_at) VALUES (?, 1048576, 25000000, 365, ?, ?)")
+        .bind(bootstrapWorkspaceId, bootstrapClientId, now),
+    ]);
+    membership = await loadMembership();
+  }
 
   if (!membership) throw new ApiError(requestedWorkspace ? 403 : 401, requestedWorkspace ? "You do not have access to that workspace." : "No active workspace membership was found.");
   if (!isWorkspaceRole(membership.role)) throw new ApiError(403, "Your workspace role is not recognised.");
@@ -123,6 +128,10 @@ export async function enforceRateLimit(context: RequestContext, scope: string, l
 
 export function apiError(error: unknown, fallback: string) {
   if (error instanceof ApiError) return Response.json({ error: error.message }, { status: error.status });
+  if (error instanceof CaseStagePolicyError) return Response.json({ error: error.message }, { status: 409 });
+  if (error instanceof Error && (/UNIQUE constraint failed/i.test(error.message) || /exceeds available balance/i.test(error.message) || /invalid recovery case transition/i.test(error.message))) {
+    return Response.json({ error: "This operation conflicts with a record that was already completed. Reload the latest data and try again." }, { status: 409 });
+  }
   console.error(JSON.stringify({ message: fallback, error: error instanceof Error ? error.message : "Unexpected error" }));
   return Response.json({ error: fallback }, { status: 500 });
 }

@@ -23,12 +23,23 @@ export async function getActiveRuleSet(context: RequestContext, businessDate = n
     id: string; version: string; tolerances_json: string; applicability_categories_json: string; practitioner_notes: string;
   }>();
   if (!row) throw new ApiError(409, "An approved rule set is required for this business date. Ask an administrator or practitioner to review Rules & controls.");
-  const tolerances = JSON.parse(row.tolerances_json || "{}") as Record<string, unknown>;
+  let tolerances: Record<string, unknown>;
+  let applicabilityCategories: string[];
+  try {
+    tolerances = JSON.parse(row.tolerances_json || "{}") as Record<string, unknown>;
+    const parsedCategories: unknown = JSON.parse(row.applicability_categories_json || "[]");
+    if (!Array.isArray(parsedCategories) || parsedCategories.some((item) => typeof item !== "string")) throw new Error("Invalid category list");
+    applicabilityCategories = parsedCategories;
+  } catch {
+    throw new ApiError(409, "The active rule set is malformed and must be replaced before processing cases.");
+  }
+  const toleranceAmountKobo = Number(tolerances.amountKobo ?? 10_000);
+  if (!Number.isInteger(toleranceAmountKobo) || toleranceAmountKobo < 0 || toleranceAmountKobo > 10_000_000 || !applicabilityCategories.length) throw new ApiError(409, "The active rule set contains invalid tolerance or applicability controls.");
   return {
     id: row.id,
     version: row.version,
-    toleranceAmountKobo: Number(tolerances.amountKobo ?? 10_000),
-    applicabilityCategories: JSON.parse(row.applicability_categories_json || "[]") as string[],
+    toleranceAmountKobo,
+    applicabilityCategories,
     practitionerNotes: row.practitioner_notes,
   };
 }

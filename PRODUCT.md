@@ -30,7 +30,7 @@ case facts -> reviewable plan / grounded draft / constrained copilot
 
 AI does not decide recoverability. Provider outputs pass strict task-specific validation and retain prompt version, source references, latency and safe error categories. Amounts, matching, exception codes, status gates and audit records remain application logic or qualified-human decisions.
 
-This is explicitly not production ready. Remaining work includes authentication and tenant isolation, production OCR for scans/image-only PDFs, background job orchestration, direct-to-R2 multipart upload, authority-system integration, external delivery controls, rules administration, production observability, data-retention governance, penetration testing, and practitioner/legal validation of Nigerian WHT content and procedures.
+This remains a controlled pilot rather than an unattended production tax system. Authentication, workspace/client isolation, governed rules and D1-only evidence storage are implemented. Remaining work includes signed identity-assertion verification at the Worker boundary, production OCR for scans/image-only PDFs, background job orchestration, authority-system integration, external delivery controls, production observability, automated retention enforcement, penetration testing, and practitioner/legal validation of Nigerian WHT content and procedures.
 
 ## Brand Personality
 

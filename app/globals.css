@@ -375,7 +375,8 @@ textarea:focus-visible,
 .stage-evidence-needed, .stage-matched { border-color: rgba(212,168,82,.2); background: var(--warning-soft); color: #e1bb70; }
 .stage-in-dispute { border-color: rgba(235,118,111,.22); background: var(--danger-soft); color: #f2958f; }
 .stage-recognised { border-color: rgba(57,217,138,.23); background: var(--success-soft); color: #66e5a4; }
-.stage-closed { border-color: var(--line); background: var(--neutral-soft); color: var(--ink-muted); }
+.stage-closed, .stage-non-recoverable, .stage-written-off { border-color: var(--line); background: var(--neutral-soft); color: var(--ink-muted); }
+.stage-invalid { border-color: rgba(235,118,111,.35); background: var(--danger-soft); color: #f2958f; }
 
 .portfolio-panel { min-width: 0; padding: 4px 0 0; }
 .portfolio-panel .section-heading { padding: 15px 0 17px; border-bottom: 1px solid var(--line); }

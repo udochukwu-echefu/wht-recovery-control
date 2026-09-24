@@ -2,9 +2,9 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "wht-recovery-control",
   "main": "./worker/index.ts",
-  "compatibility_date": "2026-05-15",
+  "compatibility_date": "2026-08-29",
   "compatibility_flags": ["nodejs_compat"],
-  "workers_dev": true,
+  "workers_dev": false,
   "observability": {
     "enabled": true,
     "logs": {

@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
-import { blob, index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { blob, index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { recoveryCaseStages } from "@/lib/case-stage-policy";
 
 export const recoveryCases = sqliteTable(
   "recovery_cases",
@@ -17,7 +18,7 @@ export const recoveryCases = sqliteTable(
     receiptNumber: text("receipt_number"),
     receiptAmountKobo: integer("receipt_amount_kobo"),
     receiptBeneficiaryTin: text("receipt_beneficiary_tin"),
-    stage: text("stage").notNull().default("detected"),
+    stage: text("stage", { enum: recoveryCaseStages }).notNull().default("detected"),
     exceptionCode: text("exception_code").notNull().default("RECEIPT_MISSING"),
     confidence: integer("confidence").notNull().default(0),
     sourceDocumentId: text("source_document_id"),
@@ -101,7 +102,7 @@ export const extractedFields = sqliteTable(
     reviewedAt: text("reviewed_at"),
     reviewedByUserId: text("reviewed_by_user_id"),
   },
-  (table) => [index("idx_extracted_fields_document").on(table.documentId)],
+  (table) => [index("idx_extracted_fields_document").on(table.documentId), uniqueIndex("uq_extracted_fields_workspace_document_field").on(table.workspaceId, table.documentId, table.fieldName)],
 );
 
 export const auditEvents = sqliteTable(
@@ -127,6 +128,7 @@ export const aiJobs = sqliteTable(
   {
     id: text("id").primaryKey(),
     workspaceId: text("workspace_id").notNull().default("pilot-workspace"),
+    clientId: text("client_id").notNull().default("local-client"),
     caseId: text("case_id"),
     documentId: text("document_id"),
     taskType: text("task_type").notNull(),
@@ -186,7 +188,7 @@ export const ledgerImports = sqliteTable(
     importedAt: text("imported_at"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
-  (table) => [index("idx_ledger_imports_document").on(table.documentId)],
+  (table) => [index("idx_ledger_imports_document").on(table.documentId), uniqueIndex("uq_ledger_imports_workspace_client_hash").on(table.workspaceId, table.clientId, table.idempotencyKey)],
 );
 
 export const caseSources = sqliteTable(
@@ -233,7 +235,7 @@ export const candidateMatches = sqliteTable(
     status: text("status").notNull().default("suggested"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
-  (table) => [index("idx_candidate_matches_document_rank").on(table.documentId, table.rank)],
+  (table) => [index("idx_candidate_matches_document_rank").on(table.documentId, table.rank), uniqueIndex("uq_candidate_matches_workspace_document_case").on(table.workspaceId, table.documentId, table.caseId), uniqueIndex("uq_candidate_matches_workspace_document_rank").on(table.workspaceId, table.documentId, table.rank)],
 );
 
 export const matchExecutions = sqliteTable(
@@ -317,7 +319,7 @@ export const workspaceMemberships = sqliteTable("workspace_memberships", {
   role: text("role").notNull(),
   status: text("status").notNull().default("active"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-}, (table) => [index("idx_memberships_user_workspace").on(table.userId, table.workspaceId)]);
+}, (table) => [index("idx_memberships_user_workspace").on(table.userId, table.workspaceId), uniqueIndex("uq_memberships_workspace_user").on(table.workspaceId, table.userId)]);
 
 export const clients = sqliteTable("clients", {
   id: text("id").primaryKey(),
@@ -361,7 +363,7 @@ export const invoices = sqliteTable("invoices", {
   currency: text("currency").notNull().default("NGN"), status: text("status").notNull().default("open"), reversalOfId: text("reversal_of_id"),
   sourceDocumentId: text("source_document_id"), sourceRow: integer("source_row"), sourceIdentity: text("source_identity").notNull(),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`), updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-}, (table) => [index("idx_invoices_workspace_reference").on(table.workspaceId, table.reference), index("idx_invoices_customer").on(table.customerId)]);
+}, (table) => [index("idx_invoices_workspace_reference").on(table.workspaceId, table.reference), index("idx_invoices_customer").on(table.customerId), uniqueIndex("uq_invoices_workspace_client_source").on(table.workspaceId, table.clientId, table.sourceIdentity)]);
 
 export const payments = sqliteTable("payments", {
   id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull(), clientId: text("client_id").notNull(), customerId: text("customer_id").notNull(),
@@ -388,7 +390,7 @@ export const receiptRecords = sqliteTable("receipt_records", {
   receiptReference: text("receipt_reference"), deductingCustomerId: text("deducting_customer_id"), deductingCustomerTin: text("deducting_customer_tin"), beneficiaryTin: text("beneficiary_tin"),
   amountKobo: integer("amount_kobo"), reportingPeriod: text("reporting_period"), receiptDate: text("receipt_date"), status: text("status").notNull().default("review_required"),
   extractionReviewedAt: text("extraction_reviewed_at"), extractionReviewedBy: text("extraction_reviewed_by"), createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-}, (table) => [index("idx_receipts_workspace_reference").on(table.workspaceId, table.receiptReference)]);
+}, (table) => [index("idx_receipts_workspace_reference").on(table.workspaceId, table.receiptReference), uniqueIndex("uq_receipts_workspace_document").on(table.workspaceId, table.documentId)]);
 
 export const receiptAllocations = sqliteTable("receipt_allocations", {
   id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull(), receiptId: text("receipt_id").notNull(), caseId: text("case_id").notNull(), invoiceId: text("invoice_id"),
@@ -402,13 +404,18 @@ export const authorityRecords = sqliteTable("authority_records", {
   deductingCustomerTin: text("deducting_customer_tin").notNull(), amountKobo: integer("amount_kobo").notNull(), reportingPeriod: text("reporting_period").notNull(), filingDate: text("filing_date"),
   creditStatus: text("credit_status").notNull(), verificationState: text("verification_state").notNull().default("unverified"), sourceRow: integer("source_row"),
   verifiedByUserId: text("verified_by_user_id"), verifiedAt: text("verified_at"), createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-}, (table) => [index("idx_authority_workspace_reference").on(table.workspaceId, table.recordReference)]);
+}, (table) => [index("idx_authority_workspace_reference").on(table.workspaceId, table.recordReference), uniqueIndex("uq_authority_workspace_client_identity").on(table.workspaceId, table.clientId, table.authorityType, table.recordReference)]);
 
 export const authorityAllocations = sqliteTable("authority_allocations", {
   id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull(), authorityRecordId: text("authority_record_id").notNull(), caseId: text("case_id").notNull(), receiptAllocationId: text("receipt_allocation_id"),
+  matchExecutionId: text("match_execution_id"),
   amountKobo: integer("amount_kobo").notNull(), resultCode: text("result_code").notNull(), resultJson: text("result_json").notNull(), ruleVersion: text("rule_version").notNull(),
   verifiedByUserId: text("verified_by_user_id").notNull(), createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-}, (table) => [index("idx_authority_allocations_case").on(table.caseId), index("idx_authority_allocations_record").on(table.authorityRecordId)]);
+}, (table) => [
+  index("idx_authority_allocations_case").on(table.caseId),
+  index("idx_authority_allocations_record").on(table.authorityRecordId),
+  uniqueIndex("uq_authority_successful_receipt").on(table.workspaceId, table.authorityRecordId, table.receiptAllocationId).where(sql`${table.resultCode} IN ('matched','matched_within_tolerance')`),
+]);
 
 export const correspondenceEvents = sqliteTable("correspondence_events", {
   id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull(), caseId: text("case_id").notNull(), draftId: text("draft_id"), direction: text("direction").notNull(),
@@ -420,7 +427,7 @@ export const caseOutcomes = sqliteTable("case_outcomes", {
   id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull(), caseId: text("case_id").notNull(), outcomeType: text("outcome_type").notNull(),
   amountKobo: integer("amount_kobo").notNull(), effectiveDate: text("effective_date").notNull(), reviewerUserId: text("reviewer_user_id").notNull(), approverUserId: text("approver_user_id"),
   evidenceDocumentId: text("evidence_document_id"), decisionNote: text("decision_note").notNull(), ruleVersion: text("rule_version").notNull(), createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-}, (table) => [index("idx_case_outcomes_case_effective").on(table.caseId, table.effectiveDate)]);
+}, (table) => [index("idx_case_outcomes_case_effective").on(table.caseId, table.effectiveDate), uniqueIndex("uq_case_outcomes_workspace_case").on(table.workspaceId, table.caseId)]);
 
 export const caseNotes = sqliteTable("case_notes", {
   id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull(), caseId: text("case_id").notNull(), body: text("body").notNull(),
@@ -438,7 +445,11 @@ export const ruleSets = sqliteTable("rule_sets", {
   tolerancesJson: text("tolerances_json").notNull().default("{}"), applicabilityCategoriesJson: text("applicability_categories_json").notNull().default("[]"),
   practitionerNotes: text("practitioner_notes").notNull().default(""), changeReason: text("change_reason").notNull(), approvedByUserId: text("approved_by_user_id"), approvedAt: text("approved_at"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-}, (table) => [index("idx_rule_sets_workspace_status").on(table.workspaceId, table.status)]);
+}, (table) => [
+  index("idx_rule_sets_workspace_status").on(table.workspaceId, table.status),
+  uniqueIndex("uq_rule_sets_workspace_version_client").on(table.workspaceId, table.version, table.clientId),
+  uniqueIndex("uq_rule_sets_workspace_version_global").on(table.workspaceId, table.version).where(sql`${table.clientId} IS NULL`),
+]);
 
 export const ruleDefinitions = sqliteTable("rule_definitions", {
   id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull(), ruleSetId: text("rule_set_id").notNull(), ruleCode: text("rule_code").notNull(),

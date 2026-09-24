@@ -1,15 +1,16 @@
 import { and, eq } from "drizzle-orm";
 import { getD1, getDb } from "@/db";
-import { ensureSchema } from "@/db/ensure";
 import { aiJobs, evidenceDocuments, ledgerImports, recoveryCases } from "@/db/schema";
-import { parseLedgerCsvWithMapping, validateLedgerMapping, type ConfirmedMapping } from "@/lib/csv";
+import { ledgerSourceIdentity, parseLedgerCsvWithMapping, validateLedgerMapping, type ConfirmedMapping } from "@/lib/csv";
 import { apiError, auditStatement, requireContext, type RequestContext } from "@/lib/auth";
 import { getStoredObjectText } from "@/lib/storage";
 import { getActiveRuleSet } from "@/lib/rules";
+import { nextActionForRecoveryCase } from "@/lib/case-stage-policy";
 
 export const runtime = "edge";
 
 type LedgerAction = { importId: string; action: "validate" | "import"; mappings?: ConfirmedMapping[] };
+const MAX_FREE_TIER_SYNC_ROWS = 4;
 
 function isLedgerAction(value: unknown): value is LedgerAction {
   if (!value || typeof value !== "object") return false;
@@ -21,9 +22,9 @@ function isLedgerAction(value: unknown): value is LedgerAction {
 
 async function loadImport(context: RequestContext, importId: string) {
   const db = getDb();
-  const ledger = (await db.select().from(ledgerImports).where(and(eq(ledgerImports.id, importId), eq(ledgerImports.workspaceId, context.workspace.id))).limit(1))[0];
+  const ledger = (await db.select().from(ledgerImports).where(and(eq(ledgerImports.id, importId), eq(ledgerImports.workspaceId, context.workspace.id), eq(ledgerImports.clientId, context.clientId))).limit(1))[0];
   if (!ledger) return null;
-  const document = (await db.select().from(evidenceDocuments).where(and(eq(evidenceDocuments.id, ledger.documentId), eq(evidenceDocuments.workspaceId, context.workspace.id))).limit(1))[0];
+  const document = (await db.select().from(evidenceDocuments).where(and(eq(evidenceDocuments.id, ledger.documentId), eq(evidenceDocuments.workspaceId, context.workspace.id), eq(evidenceDocuments.clientId, context.clientId))).limit(1))[0];
   if (!document) return null;
   const csv = await getStoredObjectText(context, document.storageKey);
   if (csv === null) throw new Error("The original ledger file is unavailable.");
@@ -32,7 +33,6 @@ async function loadImport(context: RequestContext, importId: string) {
 
 export async function POST(request: Request) {
   try {
-    await ensureSchema();
     const context = await requireContext(request, ["admin", "practitioner", "reviewer"]);
     const payload: unknown = await request.json();
     if (!isLedgerAction(payload) || !payload.importId.trim()) return Response.json({ error: "A valid ledger workflow action is required." }, { status: 400 });
@@ -47,14 +47,14 @@ export async function POST(request: Request) {
       const mappingCheck = validateLedgerMapping(headers, mappings);
       const parsed = mappingCheck.valid ? parseLedgerCsvWithMapping(loaded.csv, mappings) : { rows: [], errors: mappingCheck.errors, warnings: [], duplicateSourceIdentities: [] };
       const existing = await db.select({ customer: recoveryCases.customer, invoiceReference: recoveryCases.invoiceReference }).from(recoveryCases).where(and(eq(recoveryCases.workspaceId, context.workspace.id), eq(recoveryCases.clientId, context.clientId))).limit(2_000);
-      const existingIdentities = new Set(existing.map((item) => `${item.customer.toLowerCase().replace(/[^a-z0-9]/g, "")}:${item.invoiceReference.toLowerCase().replace(/[^a-z0-9]/g, "")}`));
+      const existingIdentities = new Set(existing.map((item) => ledgerSourceIdentity(item.customer, item.invoiceReference)));
       const existingDuplicates = parsed.rows.filter((row) => existingIdentities.has(row.sourceIdentity)).map((row) => `Row ${row.sourceRow}: ${row.customer} / ${row.invoiceReference} already exists.`);
       const errors = [...parsed.errors, ...existingDuplicates];
       const validation = { valid: errors.length === 0 && parsed.rows.length > 0, validRows: parsed.rows.length, rejectedRows: errors.filter((error) => error.startsWith("Row ")).length, errors, warnings: parsed.warnings, deterministicCalculation: "expected_wht_kobo = supplied expected WHT only when it equals invoice gross minus payment net; otherwise the payment gap is stored" };
       const now = new Date().toISOString();
-      await db.update(ledgerImports).set({ status: validation.valid ? "ready_to_import" : "validation_failed", mappingJson: JSON.stringify(mappings), validationJson: JSON.stringify(validation), confirmedBy: context.user.id, confirmedAt: now }).where(and(eq(ledgerImports.id, payload.importId), eq(ledgerImports.workspaceId, context.workspace.id)));
+      await db.update(ledgerImports).set({ status: validation.valid ? "ready_to_import" : "validation_failed", mappingJson: JSON.stringify(mappings), validationJson: JSON.stringify(validation), confirmedBy: context.user.id, confirmedAt: now }).where(and(eq(ledgerImports.id, payload.importId), eq(ledgerImports.workspaceId, context.workspace.id), eq(ledgerImports.clientId, context.clientId)));
       await auditStatement(context, { documentId: loaded.document.id, eventType: "LEDGER_MAPPING_CONFIRMED", detail: { importId: payload.importId, mappings, validation, confirmedAt: now } }).run();
-      if (loaded.ledger.aiJobId) await db.update(aiJobs).set({ humanCorrection: JSON.stringify({ confirmedMapping: mappings, confirmedByUserId: context.user.id, confirmedAt: now }) }).where(and(eq(aiJobs.id, loaded.ledger.aiJobId), eq(aiJobs.workspaceId, context.workspace.id)));
+      if (loaded.ledger.aiJobId) await db.update(aiJobs).set({ humanCorrection: JSON.stringify({ confirmedMapping: mappings, confirmedByUserId: context.user.id, confirmedAt: now }) }).where(and(eq(aiJobs.id, loaded.ledger.aiJobId), eq(aiJobs.workspaceId, context.workspace.id), eq(aiJobs.clientId, context.clientId)));
       return Response.json({ importId: payload.importId, status: validation.valid ? "ready_to_import" : "validation_failed", validation });
     }
 
@@ -62,11 +62,19 @@ export async function POST(request: Request) {
     const mappings = JSON.parse(loaded.ledger.mappingJson) as ConfirmedMapping[];
     const parsed = parseLedgerCsvWithMapping(loaded.csv, mappings);
     if (parsed.errors.length || !parsed.rows.length) return Response.json({ error: "The ledger no longer passes deterministic validation.", errors: parsed.errors }, { status: 409 });
+    if (parsed.rows.length > MAX_FREE_TIER_SYNC_ROWS) return Response.json({
+      error: `This zero-cost synchronous import is limited to ${MAX_FREE_TIER_SYNC_ROWS} rows so it stays within the Cloudflare D1 free-tier query budget. Split the validated CSV into smaller files.`,
+      rowLimit: MAX_FREE_TIER_SYNC_ROWS,
+      suppliedRows: parsed.rows.length,
+    }, { status: 413 });
     const now = new Date().toISOString();
     const businessDate = parsed.rows.map((row) => row.paymentDate).filter(Boolean).sort().at(-1) ?? now.slice(0, 10);
     const ruleSet = await getActiveRuleSet(context, businessDate);
     const d1 = getD1();
     const statements = [];
+    const initialStage = "detected" as const;
+    const initialExceptionCode = "APPLICABILITY_REVIEW_REQUIRED";
+    const initialNextAction = nextActionForRecoveryCase({ stage: initialStage, exceptionCode: initialExceptionCode, hasReceipt: false });
     const createdCases: Array<{ id: string; customer: string; invoiceReference: string; expectedWhtKobo: number }> = [];
     for (const row of parsed.rows) {
       const caseId = `WHT-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
@@ -78,12 +86,12 @@ export async function POST(request: Request) {
       statements.push(d1.prepare("INSERT INTO invoices (id, workspace_id, client_id, customer_id, reference, gross_kobo, currency, status, source_document_id, source_row, source_identity, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)").bind(invoiceId, context.workspace.id, context.clientId, customerId, row.invoiceReference, row.invoiceGrossKobo, row.currency, loaded.document.id, row.sourceRow, row.sourceIdentity, now, now));
       statements.push(d1.prepare("INSERT INTO payments (id, workspace_id, client_id, customer_id, reference, payment_date, amount_kobo, currency, status, source_document_id, source_row, source_identity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'posted', ?, ?, ?, ?)").bind(paymentId, context.workspace.id, context.clientId, customerId, `PAY-${row.invoiceReference}`, row.paymentDate, row.paymentNetKobo, row.currency, loaded.document.id, row.sourceRow, `${row.sourceIdentity}:payment`, now));
       statements.push(d1.prepare("INSERT INTO payment_allocations (id, workspace_id, payment_id, invoice_id, amount_kobo, status, created_at) VALUES (?, ?, ?, ?, ?, 'confirmed', ?)").bind(crypto.randomUUID(), context.workspace.id, paymentId, invoiceId, row.paymentNetKobo, now));
-      statements.push(d1.prepare("INSERT INTO recovery_cases (id, workspace_id, client_id, customer, customer_tin, invoice_reference, invoice_gross_kobo, payment_net_kobo, expected_wht_kobo, reporting_period, stage, exception_code, confidence, source_document_id, rule_version, applicability_status, next_action, business_date, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'detected', 'APPLICABILITY_REVIEW_REQUIRED', 0, ?, ?, 'pending', 'Confirm WHT applicability', ?, ?, ?)").bind(caseId, context.workspace.id, context.clientId, row.customer, row.customerTin, row.invoiceReference, row.invoiceGrossKobo, row.paymentNetKobo, row.expectedWhtKobo, row.reportingPeriod, loaded.document.id, ruleSet.version, row.paymentDate, now, now));
+      statements.push(d1.prepare("INSERT INTO recovery_cases (id, workspace_id, client_id, customer, customer_tin, invoice_reference, invoice_gross_kobo, payment_net_kobo, expected_wht_kobo, reporting_period, stage, exception_code, confidence, source_document_id, rule_version, applicability_status, next_action, business_date, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'pending', ?, ?, ?, ?)").bind(caseId, context.workspace.id, context.clientId, row.customer, row.customerTin, row.invoiceReference, row.invoiceGrossKobo, row.paymentNetKobo, row.expectedWhtKobo, row.reportingPeriod, initialStage, initialExceptionCode, loaded.document.id, ruleSet.version, initialNextAction, row.paymentDate, now, now));
       statements.push(d1.prepare("INSERT INTO case_sources (id, workspace_id, case_id, document_id, ledger_import_id, source_row, source_identity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), context.workspace.id, caseId, loaded.document.id, payload.importId, row.sourceRow, row.sourceIdentity, now));
       statements.push(auditStatement(context, { caseId, documentId: loaded.document.id, eventType: "CASE_CREATED", actor: "system", detail: { sourceRow: row.sourceRow, ledgerImportId: payload.importId, customerId, invoiceId, paymentId, deterministicPaymentGapKobo: row.expectedWhtKobo, ruleVersion: ruleSet.version, nextControl: "applicability_review" } }));
     }
-    statements.push(d1.prepare("UPDATE ledger_imports SET status = 'imported', imported_at = ? WHERE id = ? AND workspace_id = ?").bind(now, payload.importId, context.workspace.id));
-    statements.push(d1.prepare("UPDATE evidence_documents SET status = 'imported', row_count = ? WHERE id = ? AND workspace_id = ?").bind(parsed.rows.length, loaded.document.id, context.workspace.id));
+    statements.push(d1.prepare("UPDATE ledger_imports SET status = 'imported', imported_at = ? WHERE id = ? AND workspace_id = ? AND client_id = ?").bind(now, payload.importId, context.workspace.id, context.clientId));
+    statements.push(d1.prepare("UPDATE evidence_documents SET status = 'imported', row_count = ? WHERE id = ? AND workspace_id = ? AND client_id = ?").bind(parsed.rows.length, loaded.document.id, context.workspace.id, context.clientId));
     statements.push(auditStatement(context, { documentId: loaded.document.id, eventType: "LEDGER_IMPORTED", detail: { importId: payload.importId, caseCount: parsed.rows.length, caseIds: createdCases.map((item) => item.id), ruleVersion: ruleSet.version } }));
     await d1.batch(statements);
     return Response.json({ importId: payload.importId, status: "imported", importedCases: parsed.rows.length, cases: createdCases }, { status: 201 });

@@ -1,6 +1,5 @@
 import { and, desc, eq, getTableColumns, isNull, sql } from "drizzle-orm";
 import { getDb } from "@/db";
-import { ensureSchema } from "@/db/ensure";
 import { clients, evidenceDocuments, recoveryCases } from "@/db/schema";
 import { apiError, requireContext } from "@/lib/auth";
 
@@ -8,7 +7,6 @@ export const runtime = "edge";
 
 export async function GET(request: Request) {
   try {
-    await ensureSchema();
     const context = await requireContext(request);
     const db = getDb();
     const [cases, documents, client] = await Promise.all([

@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, readdir } from "node:fs/promises";
 import test from "node:test";
+
+// These source contracts span the feature modules; rendering is checked separately.
+async function readWorkspaceSources() {
+  const directory = new URL("../features/recovery/", import.meta.url);
+  const files = (await readdir(directory)).filter((file) => /\.tsx?$/.test(file)).sort();
+  return (await Promise.all(files.map((file) => readFile(new URL(file, directory), "utf8")))).join("\n").replace(/\s+/g, " ");
+}
 
 async function render() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -30,7 +37,7 @@ test("server-renders the WHT recovery workspace", async () => {
 
 test("starter preview is removed and product metadata is present", async () => {
   const [page, layout, packageJson] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readWorkspaceSources(),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
   ]);
@@ -62,7 +69,7 @@ test("AI provider abstraction keeps a deterministic demo and manual fallback", a
 
 test("reviewer corrections are audited before recognition", async () => {
   const [page, reviewRoute, schemaEnsure, matching] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readWorkspaceSources(),
     readFile(new URL("../app/api/review/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0002_audit_immutability.sql", import.meta.url), "utf8"),
     readFile(new URL("../lib/matching.ts", import.meta.url), "utf8"),
@@ -73,7 +80,7 @@ test("reviewer corrections are audited before recognition", async () => {
   assert.match(reviewRoute, /EXTRACTION_REVIEW_COMPLETED/);
   assert.match(reviewRoute, /Add a review note of at least 10 characters/);
   assert.match(reviewRoute, /Recognition is blocked until deterministic matching has no open exception/);
-  assert.match(reviewRoute, /Recognition is blocked until an authority record is connected and verified/);
+  assert.match(reviewRoute, /latest applicability, receipt match, client TIN, or authority reconciliation is stale/);
   assert.match(schemaEnsure, /audit_events_no_update/);
   assert.match(schemaEnsure, /audit_events_no_delete/);
   assert.match(matching, /INVOICE_MISMATCH/);
@@ -81,7 +88,7 @@ test("reviewer corrections are audited before recognition", async () => {
 
 test("theme choice persists and application dropdowns use the custom listbox", async () => {
   const [page, layout, styles] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readWorkspaceSources(),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
@@ -98,7 +105,7 @@ test("theme choice persists and application dropdowns use the custom listbox", a
 
 test("settings are workspace-scoped, role-aware and auditable", async () => {
   const [page, route, styles] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readWorkspaceSources(),
     readFile(new URL("../app/api/settings/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
@@ -121,7 +128,7 @@ test("settings are workspace-scoped, role-aware and auditable", async () => {
 
 test("case copilot sends the reviewer question through the secured server-grounded route", async () => {
   const [page, assistantRoute] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readWorkspaceSources(),
     readFile(new URL("../app/api/assistant/route.ts", import.meta.url), "utf8"),
   ]);
   assert.match(page, /question: action === "copilot" \? copilotQuestion\.trim\(\) : undefined/);
@@ -142,7 +149,7 @@ test("case copilot sends the reviewer question through the secured server-ground
 
 test("demo and live records have an explicit non-merging boundary", async () => {
   const [page, casesRoute, assistantRoute, auth] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readWorkspaceSources(),
     readFile(new URL("../app/api/cases/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/assistant/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/auth.ts", import.meta.url), "utf8"),
@@ -159,7 +166,7 @@ test("demo and live records have an explicit non-merging boundary", async () => 
 });
 
 test("demo AI interactions stay local and never require a production session", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readWorkspaceSources();
 
   assert.match(page, /<AiActivityView key=\{appMode\} mode=\{appMode\}/);
   assert.match(page, /function demoAiActivityJobs/);

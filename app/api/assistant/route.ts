@@ -1,6 +1,5 @@
 import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { ensureSchema } from "@/db/ensure";
 import { aiJobs, auditEvents, authorityAllocations, clients, communicationDrafts, correspondenceEvents, evidenceDocuments, extractedFields, matchExecutions, recoveryCases, recoveryPlans } from "@/db/schema";
 import type { AiTaskType, CaseCopilotOutput, CommunicationDraftOutput, EvidenceSummaryOutput, PortfolioBriefingOutput, RecoveryPlanOutput } from "@/lib/ai/contracts";
 import { runAiTask } from "@/lib/ai/service";
@@ -18,13 +17,13 @@ const actionTask: Record<string, AiTaskType> = {
 
 async function groundCase(context: RequestContext, caseId: string) {
   const db = getDb();
-  const recoveryCase = (await db.select().from(recoveryCases).where(and(eq(recoveryCases.id, caseId), eq(recoveryCases.workspaceId, context.workspace.id))).limit(1))[0];
+  const recoveryCase = (await db.select().from(recoveryCases).where(and(eq(recoveryCases.id, caseId), eq(recoveryCases.workspaceId, context.workspace.id), eq(recoveryCases.clientId, context.clientId))).limit(1))[0];
   if (!recoveryCase) return null;
   const [fields, events, correspondence, documents, client, latestMatch, authority] = await Promise.all([
     recoveryCase.sourceDocumentId ? db.select().from(extractedFields).where(and(eq(extractedFields.documentId, recoveryCase.sourceDocumentId), eq(extractedFields.workspaceId, context.workspace.id))) : [],
     db.select({ eventType: auditEvents.eventType, detailJson: auditEvents.detailJson, createdAt: auditEvents.createdAt }).from(auditEvents).where(and(eq(auditEvents.caseId, caseId), eq(auditEvents.workspaceId, context.workspace.id))).orderBy(desc(auditEvents.createdAt)).limit(50),
     db.select().from(correspondenceEvents).where(and(eq(correspondenceEvents.caseId, caseId), eq(correspondenceEvents.workspaceId, context.workspace.id))).orderBy(desc(correspondenceEvents.occurredAt)).limit(20),
-    recoveryCase.sourceDocumentId ? db.select({ id: evidenceDocuments.id, fileName: evidenceDocuments.fileName, kind: evidenceDocuments.kind, status: evidenceDocuments.status, sha256: evidenceDocuments.sha256 }).from(evidenceDocuments).where(and(eq(evidenceDocuments.id, recoveryCase.sourceDocumentId), eq(evidenceDocuments.workspaceId, context.workspace.id))) : [],
+    recoveryCase.sourceDocumentId ? db.select({ id: evidenceDocuments.id, fileName: evidenceDocuments.fileName, kind: evidenceDocuments.kind, status: evidenceDocuments.status, sha256: evidenceDocuments.sha256 }).from(evidenceDocuments).where(and(eq(evidenceDocuments.id, recoveryCase.sourceDocumentId), eq(evidenceDocuments.workspaceId, context.workspace.id), eq(evidenceDocuments.clientId, context.clientId))) : [],
     db.select({ tin: clients.tin, legalName: clients.legalName }).from(clients).where(and(eq(clients.id, recoveryCase.clientId), eq(clients.workspaceId, context.workspace.id))).limit(1),
     db.select({ resultJson: matchExecutions.resultJson, ruleVersion: matchExecutions.ruleVersion, createdAt: matchExecutions.createdAt }).from(matchExecutions).where(and(eq(matchExecutions.caseId, caseId), eq(matchExecutions.workspaceId, context.workspace.id))).orderBy(desc(matchExecutions.createdAt)).limit(1),
     db.select({ resultCode: authorityAllocations.resultCode, resultJson: authorityAllocations.resultJson, ruleVersion: authorityAllocations.ruleVersion, createdAt: authorityAllocations.createdAt }).from(authorityAllocations).where(and(eq(authorityAllocations.caseId, caseId), eq(authorityAllocations.workspaceId, context.workspace.id))).orderBy(desc(authorityAllocations.createdAt)).limit(1),
@@ -57,9 +56,8 @@ async function groundCase(context: RequestContext, caseId: string) {
 
 export async function GET(request: Request) {
   try {
-    await ensureSchema();
     const context = await requireContext(request);
-    const jobs = await getDb().select().from(aiJobs).where(eq(aiJobs.workspaceId, context.workspace.id)).orderBy(desc(aiJobs.createdAt)).limit(100);
+    const jobs = await getDb().select().from(aiJobs).where(and(eq(aiJobs.workspaceId, context.workspace.id), eq(aiJobs.clientId, context.clientId))).orderBy(desc(aiJobs.createdAt)).limit(100);
     return Response.json({ jobs: jobs.map((job) => ({ ...job, sourceReferences: JSON.parse(job.sourceReferencesJson || "[]"), output: job.outputJson ? JSON.parse(job.outputJson) : null, humanCorrection: job.humanCorrection ? JSON.parse(job.humanCorrection) : null, sourceReferencesJson: undefined, outputJson: undefined })) });
   } catch (error) {
     return apiError(error, "AI activity is temporarily unavailable.");
@@ -68,7 +66,6 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    await ensureSchema();
     const context = await requireContext(request, ["admin", "practitioner", "reviewer", "analyst"]);
     await enforceRateLimit(context, "assistant", 20, 60);
     const body = await request.json() as { action?: unknown; caseId?: unknown; documentId?: unknown; question?: unknown; draftType?: unknown };
@@ -76,7 +73,8 @@ export async function POST(request: Request) {
     const task = actionTask[action];
     if (!task) return Response.json({ error: "A supported assistant action is required." }, { status: 400 });
     const caseId = typeof body.caseId === "string" ? body.caseId.trim() : "";
-    const documentId = typeof body.documentId === "string" ? body.documentId.trim() : undefined;
+    const requestedDocumentId = typeof body.documentId === "string" ? body.documentId.trim() : undefined;
+    let documentId: string | undefined;
     const question = typeof body.question === "string" ? body.question.trim().slice(0, 500) : "";
     if (task === "case_copilot" && !question) return Response.json({ error: "Enter a question about this case." }, { status: 400 });
     let input: Record<string, unknown>;
@@ -87,9 +85,12 @@ export async function POST(request: Request) {
       if (!caseId) return Response.json({ error: "caseId is required for this assistant action." }, { status: 400 });
       const grounded = await groundCase(context, caseId);
       if (!grounded) return Response.json({ error: "Case not found." }, { status: 404 });
+      const groundedDocumentIds = new Set(grounded.evidenceDocuments.map((document) => document.id));
+      if (requestedDocumentId && !groundedDocumentIds.has(requestedDocumentId)) return Response.json({ error: "The requested document is not evidence for this case in the active client scope." }, { status: 400 });
+      documentId = requestedDocumentId || grounded.evidenceDocuments[0]?.id;
       input = { ...grounded, question: question || undefined, draftType: typeof body.draftType === "string" ? body.draftType.slice(0, 80) : undefined };
     }
-    const result = await runAiTask<RecoveryPlanOutput | CommunicationDraftOutput | EvidenceSummaryOutput | PortfolioBriefingOutput | CaseCopilotOutput>({ type: task, caseId: caseId || undefined, documentId, workspaceId: context.workspace.id, requestedByUserId: context.user.id, input });
+    const result = await runAiTask<RecoveryPlanOutput | CommunicationDraftOutput | EvidenceSummaryOutput | PortfolioBriefingOutput | CaseCopilotOutput>({ type: task, caseId: caseId || undefined, documentId, workspaceId: context.workspace.id, clientId: context.clientId, requestedByUserId: context.user.id, input });
     if (!result.output) return Response.json({ error: result.safeMessage ?? "Assistant output requires manual review.", ai: result }, { status: 422 });
     const db = getDb();
     let artifactId: string | null = null;
