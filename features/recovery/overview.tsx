@@ -16,7 +16,6 @@ import {
 } from "lucide-react";
 import { formatNaira, formatDays } from "./presentation";
 import { PortfolioBriefingPanel } from "./portfolio-briefing";
-import { OverviewAssistant } from "./overview-assistant";
 import { RecoveryTable } from "./recovery-table";
 
 export function Overview({
@@ -25,8 +24,6 @@ export function Overview({
   openAmount,
   recognisedAmount,
   interventionAmount,
-  profileName,
-  sessionScope,
   onOpenCase,
   onViewCases,
   onFilterCases,
@@ -36,8 +33,6 @@ export function Overview({
   openAmount: number;
   recognisedAmount: number;
   interventionAmount: number;
-  profileName: string;
-  sessionScope: string;
   onOpenCase: (id: string) => void;
   onViewCases: () => void;
   onFilterCases: (filter: CaseFilter) => void;
@@ -137,16 +132,6 @@ export function Overview({
       <PortfolioBriefingPanel
         mode={mode}
         cases={cases}
-        onFilterCases={onFilterCases}
-      />
-
-      <OverviewAssistant
-        key={`${mode}:${sessionScope}`}
-        mode={mode}
-        profileName={profileName}
-        cases={cases}
-        onOpenCase={onOpenCase}
-        onViewCases={onViewCases}
         onFilterCases={onFilterCases}
       />
 

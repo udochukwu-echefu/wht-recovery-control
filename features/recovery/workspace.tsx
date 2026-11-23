@@ -4,10 +4,10 @@ import {
   LayoutDashboard,
   FolderClock,
   Upload,
+  Plus,
   SlidersHorizontal,
   Activity,
   X,
-  HelpCircle,
   Settings2,
   ShieldCheck,
   Menu,
@@ -57,6 +57,7 @@ import { CasesView } from "./cases-view";
 import { ImportsView } from "./imports-view";
 import { RulesView } from "./rules-view";
 import { AiActivityView } from "./ai-activity";
+import { OverviewAssistant } from "./overview-assistant";
 import { SettingsView } from "./settings-view";
 
 const navItems = [
@@ -98,13 +99,26 @@ export function Home() {
   const [isEvidenceConfirming, setIsEvidenceConfirming] = useState(false);
   const [aiStatus, setAiStatus] = useState<AiStatus>({
     configured: false,
-    model: "deepseek-v4-flash",
+    model: "deepseek-flash",
     provider: "DeepSeek",
     release: "V4 Flash 0731",
   });
   const [importBatches, setImportBatches] = useState(initialImportBatches);
+  const [assistantActionVersion, setAssistantActionVersion] = useState(0);
+  const [assistantOpen, setAssistantOpen] = useState(false);
   const ledgerInputRef = useRef<HTMLInputElement>(null);
   const evidenceInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const toggleAssistant = (event: globalThis.KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "j") {
+        event.preventDefault();
+        setAssistantOpen((value) => !value);
+      }
+    };
+    window.addEventListener("keydown", toggleAssistant);
+    return () => window.removeEventListener("keydown", toggleAssistant);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -164,7 +178,7 @@ export function Home() {
     return () => {
       active = false;
     };
-  }, [appMode]);
+  }, [appMode, assistantActionVersion]);
 
   const switchMode = (mode: AppMode) => {
     if (mode === "live" && window.location.hostname.endsWith(".workers.dev")) return;
@@ -173,6 +187,10 @@ export function Home() {
     setLedgerWorkflow(null);
     setEvidenceWorkflow(null);
     window.localStorage.setItem("wht-app-mode", mode);
+  };
+
+  const refreshAfterAssistantAction = () => {
+    setAssistantActionVersion((version) => version + 1);
   };
 
   const toggleTheme = () => {
@@ -795,11 +813,6 @@ export function Home() {
 
         <div className="sidebar-foot">
           <div className="utility-nav" aria-label="Workspace utilities">
-            <button disabled title="Support centre coming soon">
-              <HelpCircle size={17} />
-              <span>Support</span>
-              <small>Coming soon</small>
-            </button>
             <button
               className={view === "settings" && !selectedCase ? "active" : ""}
               onClick={() => navigate("settings")}
@@ -918,36 +931,6 @@ export function Home() {
             )}
           </div>
           <div className="topbar-actions">
-            <div
-              className="mode-switch"
-              role="group"
-              aria-label="Workspace data mode"
-            >
-              <button
-                className={appMode === "demo" ? "active" : ""}
-                onClick={() => switchMode("demo")}
-                aria-pressed={appMode === "demo"}
-              >
-                Demo
-              </button>
-              <button
-                className={appMode === "live" ? "active" : ""}
-                onClick={() => switchMode("live")}
-                aria-pressed={appMode === "live"}
-                disabled={publicDemoHost}
-                title={publicDemoHost ? "Live workspace requires a protected domain" : undefined}
-              >
-                Live
-              </button>
-            </div>
-            <button
-              className="icon-button"
-              aria-label="Help centre coming soon"
-              title="Help centre coming soon"
-              disabled
-            >
-              <HelpCircle size={18} />
-            </button>
             <button
               className="icon-button theme-toggle"
               onClick={toggleTheme}
@@ -961,11 +944,11 @@ export function Home() {
               <button
                 className="primary-button global-import"
                 onClick={() => navigate("imports")}
-                aria-label="Import evidence"
+                aria-label="New intake"
                 title="Open data intake"
               >
-                <Upload size={18} strokeWidth={2.3} />
-                <span>Import evidence</span>
+                <Plus size={18} strokeWidth={2.4} />
+                <span>New intake</span>
               </button>
             )}
           </div>
@@ -1018,8 +1001,6 @@ export function Home() {
                 openAmount={openAmount}
                 recognisedAmount={recognisedAmount}
                 interventionAmount={interventionAmount}
-                profileName={profileName}
-                sessionScope={appMode === "demo" ? "demo" : `${session?.workspace.id ?? "loading"}:${session?.clientId ?? "loading"}:${session?.user.email ?? "loading"}`}
                 onOpenCase={openCase}
                 onViewCases={() => showCases("all")}
                 onFilterCases={showCases}
@@ -1072,6 +1053,7 @@ export function Home() {
                 mode={appMode}
                 onNotify={notify}
                 onOpenCase={openCase}
+                onActionApplied={refreshAfterAssistantAction}
               />
             )}
             {view === "settings" && (
@@ -1080,12 +1062,38 @@ export function Home() {
                 session={session}
                 onNotify={notify}
                 onSwitchLive={() => switchMode("live")}
+                onSwitchDemo={() => switchMode("demo")}
                 onToggleTheme={toggleTheme}
               />
             )}
           </div>
         )}
       </main>
+
+      <OverviewAssistant
+        key={`${appMode}:${appMode === "demo" ? "demo" : `${session?.workspace.id ?? "loading"}:${session?.clientId ?? "loading"}:${session?.user.email ?? "loading"}`}`}
+        open={assistantOpen}
+        onClose={() => setAssistantOpen(false)}
+        mode={appMode}
+        canReviewProposals={appMode === "live" && ["admin", "practitioner", "reviewer"].includes(session?.workspace.role ?? "")}
+        cases={cases}
+        onOpenCase={openCase}
+        onViewCases={() => showCases("all")}
+        onFilterCases={showCases}
+        onActionApplied={refreshAfterAssistantAction}
+      />
+      {!assistantOpen && (
+        <button
+          className="assistant-fab"
+          onClick={() => setAssistantOpen(true)}
+          aria-expanded={false}
+          aria-controls="assistant-panel"
+          title="Open assistant (⌘J)"
+        >
+          <span className="assistant-orb" aria-hidden="true" />
+          <span>Ask assistant</span>
+        </button>
+      )}
 
       {toast && (
         <div className="toast" role="status">

@@ -3,21 +3,22 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent } from "react";
 import {
   ArrowRight,
+  ArrowUp,
+  Check,
+  CircleAlert,
   Copy,
   FileText,
-  FilePlus2,
   History,
   LoaderCircle,
   Mic,
   Paperclip,
-  Plus,
-  Send,
-  Sparkles,
-  Tag,
-  UserRoundPlus,
+  Search,
+  SquarePen,
   X,
 } from "lucide-react";
 import { formatNaira } from "./presentation";
+import { ActionProposalCard } from "./action-proposal";
+import type { ActionProposalPreview } from "@/lib/ai/action-contracts";
 import { consumeChatStream, type ChatStreamEvent } from "@/lib/ai/chat-stream";
 import type { AppMode, CaseFilter, RecoveryCase } from "./types";
 
@@ -31,12 +32,13 @@ type AssistantAnswer = {
 };
 
 type ChatActivity = { id: string; label: string; state: "running" | "complete"; detail?: string; kind: "status" | "tool" };
+type ChatProposal = ActionProposalPreview;
 
 type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
-  metadata: Omit<AssistantAnswer, "text"> & { attachmentName?: string; aiJobId?: string; activity?: ChatActivity[] };
+  metadata: Omit<AssistantAnswer, "text"> & { attachmentName?: string; aiJobId?: string; activity?: ChatActivity[]; proposal?: ChatProposal; backgroundRun?: { id: string; status: "queued" | "running" | "completed" | "failed" | "canceled"; scheduledFor?: string; phase?: string } };
   state?: "thinking" | "streaming" | "done" | "error";
   activity?: ChatActivity[];
   error?: string;
@@ -82,7 +84,7 @@ function answerQuestion(question: string, cases: RecoveryCase[]): AssistantAnswe
       (item) => item.stage === "recognised" || item.stage === "closed",
     );
     return {
-      text: `${recognised.length} ${recognised.length === 1 ? "case is" : "cases are"} recognised or closed, worth ${formatNaira(recognised.reduce((sum, item) => sum + item.amount, 0))}. ${intervention.length} ${intervention.length === 1 ? "case still needs" : "cases still need"} intervention. The coverage panel below breaks down the remaining value by stage.`,
+      text: `${recognised.length} ${recognised.length === 1 ? "case is" : "cases are"} recognised or closed, worth ${formatNaira(recognised.reduce((sum, item) => sum + item.amount, 0))}. ${intervention.length} ${intervention.length === 1 ? "case still needs" : "cases still need"} intervention. Open Recovery overview for the evidence coverage breakdown.`,
       action: { label: "View all cases" },
     };
   }
@@ -93,7 +95,7 @@ function answerQuestion(question: string, cases: RecoveryCase[]): AssistantAnswe
     return {
       text: top
         ? `${intervention.length} ${intervention.length === 1 ? "case requires" : "cases require"} intervention, totalling ${formatNaira(intervention.reduce((sum, item) => sum + item.amount, 0))}. ${top.customer} leads the queue at ${formatNaira(top.amount)} and ${top.age} days open. Its next action is: ${top.nextAction}`
-        : "No current cases require intervention. The recovery queue below shows the active portfolio.",
+        : "No current cases require intervention. Open the recovery queue to inspect the active portfolio.",
       action: top
         ? { label: `Open ${top.customer}`, caseId: top.id }
         : { label: "View all cases" },
@@ -106,19 +108,25 @@ function answerQuestion(question: string, cases: RecoveryCase[]): AssistantAnswe
 }
 
 export function OverviewAssistant({
+  open,
+  onClose,
   mode,
-  profileName,
+  canReviewProposals,
   cases,
   onOpenCase,
   onViewCases,
   onFilterCases,
+  onActionApplied,
 }: {
+  open: boolean;
+  onClose: () => void;
   mode: AppMode;
-  profileName: string;
+  canReviewProposals: boolean;
   cases: RecoveryCase[];
   onOpenCase: (id: string) => void;
   onViewCases: () => void;
   onFilterCases: (filter: CaseFilter) => void;
+  onActionApplied?: () => void;
 }) {
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -135,10 +143,25 @@ export function OverviewAssistant({
   const fileRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<SpeechRecognizer | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
-  const sectionRef = useRef<HTMLElement>(null);
-  const firstName = profileName.trim().split(/\s+/)[0] || "there";
+  const hasRunningInvestigation = messages.some((message) => message.metadata.backgroundRun?.status === "queued" || message.metadata.backgroundRun?.status === "running");
+  const onlyWaitingFollowups = hasRunningInvestigation && messages.filter((message) => message.metadata.backgroundRun?.status === "queued" || message.metadata.backgroundRun?.status === "running").every((message) => message.metadata.backgroundRun?.status === "queued" && Boolean(message.metadata.backgroundRun.scheduledFor));
 
   useEffect(() => () => recognitionRef.current?.stop(), []);
+
+  useEffect(() => {
+    if (open) requestAnimationFrame(() => inputRef.current?.focus());
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (historyOpen) setHistoryOpen(false);
+      else onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [open, historyOpen, onClose]);
 
   useEffect(() => {
     if (mode !== "live") return;
@@ -156,6 +179,23 @@ export function OverviewAssistant({
       .finally(() => { if (!cancelled) setLoadingHistory(false); });
     return () => { cancelled = true; };
   }, [mode]);
+
+  useEffect(() => {
+    if (mode !== "live" || !activeConversationId || !hasRunningInvestigation || busy) return;
+    let canceled = false;
+    const timer = window.setInterval(() => {
+      void fetch(`/api/assistant/conversations?id=${encodeURIComponent(activeConversationId)}`)
+        .then(async (response) => {
+          const result = await response.json() as { messages?: ChatMessage[]; conversations?: Conversation[] };
+          if (response.ok && !canceled) {
+            setMessages(result.messages ?? []);
+            setConversations(result.conversations ?? []);
+          }
+        })
+        .catch(() => { /* The next poll can resume progress after a transient network error. */ });
+    }, onlyWaitingFollowups ? 30_000 : 2_000);
+    return () => { canceled = true; window.clearInterval(timer); };
+  }, [mode, activeConversationId, hasRunningInvestigation, onlyWaitingFollowups, busy]);
 
   useLayoutEffect(() => {
     const transcript = transcriptRef.current;
@@ -193,6 +233,45 @@ export function OverviewAssistant({
     setActiveConversationId(result.activeId ?? null);
     setMessages(result.messages ?? []);
     return result;
+  };
+
+  const cancelInvestigation = async (runId: string) => {
+    try {
+      const response = await fetch("/api/assistant/runs", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ runId }) });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || "The investigation could not be canceled.");
+      setMessages((current) => current.map((message) => message.metadata.backgroundRun?.id === runId
+        ? { ...message, state: "error", error: "Investigation canceled.", metadata: { ...message.metadata, backgroundRun: { id: runId, status: "canceled" } } }
+        : message));
+    } catch (failure) { setError(failure instanceof Error ? failure.message : "The investigation could not be canceled."); }
+  };
+
+  const startBackgroundInvestigation = async () => {
+    const prompt = question.trim();
+    if (busy || loadingHistory || mode !== "live" || attachment || !prompt) return;
+    setBusy(true);
+    setError("");
+    try {
+      let id = activeConversationId;
+      if (!id) {
+        const response = await fetch("/api/assistant/conversations", { method: "POST" });
+        const created = await response.json() as Conversation & { error?: string };
+        if (!response.ok) throw new Error(created.error || "A new conversation could not be started.");
+        id = created.id;
+        setActiveConversationId(id);
+        setConversations((current) => [created, ...current].slice(0, 20));
+      }
+      const response = await fetch("/api/assistant/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ conversationId: id, question: prompt }) });
+      const result = await response.json() as { runId?: string; error?: string };
+      if (!response.ok || !result.runId) throw new Error(result.error || "The investigation could not be started.");
+      setMessages((current) => [...current,
+        { id: crypto.randomUUID(), role: "user", content: prompt, metadata: {}, state: "done" },
+        { id: crypto.randomUUID(), role: "assistant", content: "", metadata: { backgroundRun: { id: result.runId!, status: "queued" } }, state: "thinking", activity: [{ id: "queued", kind: "status", label: "Investigation queued", state: "running" }] },
+      ]);
+      setQuestion("");
+      setHistoryOpen(false);
+    } catch (failure) { setError(failure instanceof Error ? failure.message : "The investigation could not be started."); }
+    finally { setBusy(false); }
   };
 
   const newConversation = async () => {
@@ -233,7 +312,6 @@ export function OverviewAssistant({
     const userMessage: ChatMessage = { id: userId, role: "user", content: userText, metadata: { attachmentName: selectedFile?.name }, state: "done" };
     const pendingMessage: ChatMessage = { id: assistantId, role: "assistant", content: "", metadata: {}, state: "thinking", activity: [{ id: "request", kind: "status", label: "Starting request", state: "running" }] };
     setMessages((current) => [...current, userMessage, pendingMessage]);
-    if (messages.length === 0) requestAnimationFrame(() => sectionRef.current?.scrollIntoView({ block: "start" }));
     setQuestion("");
     setAttachment(null);
     setBusy(true);
@@ -372,13 +450,32 @@ export function OverviewAssistant({
     }
   };
 
+  const stateLabel = (message: ChatMessage) =>
+    message.metadata.backgroundRun && message.state === "thinking"
+      ? "Running in the background"
+      : message.state === "thinking"
+        ? "Working"
+        : message.state === "streaming"
+          ? "Writing"
+          : null;
+
   return (
-    <section ref={sectionRef} className={`overview-assistant${messages.length ? " has-messages" : ""}`} aria-label="Portfolio assistant">
-      <header className="overview-chat-header">
-        <span className="overview-chat-title"><span className="overview-chat-mark"><Sparkles size={16} /></span> Portfolio assistant</span>
-        <div className="overview-chat-header-actions">
-          {mode === "live" && <button type="button" aria-expanded={historyOpen} onClick={() => setHistoryOpen((value) => !value)} disabled={busy || loadingHistory}><History size={16} /> History</button>}
-          <button type="button" onClick={() => void newConversation()} disabled={busy || loadingHistory}><Plus size={16} /> New chat</button>
+    <aside
+      id="assistant-panel"
+      className={`assistant-panel${open ? " open" : ""}`}
+      aria-label="Portfolio assistant"
+      aria-hidden={!open}
+      inert={!open}
+    >
+      <header className="assistant-panel-header">
+        <div className="assistant-panel-title">
+          <h2>Assistant</h2>
+          <p>{mode === "demo" ? "Answers from the demo portfolio" : "Answers from your case records"}</p>
+        </div>
+        <div className="assistant-header-actions">
+          {mode === "live" && <button type="button" className="icon-button" aria-label="Conversation history" title="Conversation history" aria-expanded={historyOpen} onClick={() => setHistoryOpen((value) => !value)} disabled={busy || loadingHistory}><History size={17} /></button>}
+          <button type="button" className="icon-button" aria-label="New chat" title="New chat" onClick={() => void newConversation()} disabled={busy || loadingHistory}><SquarePen size={16} /></button>
+          <button type="button" className="icon-button" aria-label="Close assistant" title="Close (Esc)" onClick={onClose}><X size={18} /></button>
         </div>
       </header>
       {historyOpen && (
@@ -388,64 +485,92 @@ export function OverviewAssistant({
           )) : <p>No previous conversations.</p>}
         </div>
       )}
-      <div className="overview-assistant-body">
-        {loadingHistory ? <div className="overview-chat-loading"><LoaderCircle className="overview-assistant-spinner" size={19} /> Loading conversation…</div> : messages.length === 0 ? (
-          <div className="overview-chat-empty">
-            <div className="overview-assistant-orb" aria-hidden="true" />
-            <h2>Welcome, {firstName}<br />What can I help with today?</h2>
-            <div className="overview-assistant-shortcuts" aria-label="Quick actions">
-              <button type="button" disabled={busy} onClick={() => void send("Which cases need my attention?")}><Tag size={18} /> Review exceptions</button>
-              <button type="button" disabled={busy} onClick={() => void send("Explain evidence coverage")}><FileText size={18} /> Explain coverage</button>
-              <button type="button" onClick={onViewCases}><UserRoundPlus size={19} /> Open case queue</button>
-            </div>
-            <p className="overview-assistant-eyebrow">Ask about what we found</p>
-            <div className="overview-assistant-suggestions">
-              {["Which cases need my attention?", "Where is evidence still missing?"].map((suggestion) => (
-                <button key={suggestion} type="button" disabled={busy} onClick={() => void send(suggestion)}><Sparkles size={18} /><span>{suggestion}</span><ArrowRight size={18} /></button>
+      <div className="assistant-body">
+        {loadingHistory ? (
+          <div className="assistant-loading"><LoaderCircle className="overview-assistant-spinner" size={18} /> Loading conversation…</div>
+        ) : messages.length === 0 ? (
+          <div className="assistant-chat-empty">
+            <p className="assistant-chat-empty-lead">Ask about cases, evidence gaps or recognised value. Answers name the records they use, and nothing changes without reviewer approval.</p>
+            <p className="assistant-chat-empty-label">Try asking</p>
+            <div className="assistant-suggestions">
+              {["Which cases need my attention?", "Where is evidence still missing?", "Explain evidence coverage"].map((suggestion) => (
+                <button key={suggestion} type="button" disabled={busy} onClick={() => void send(suggestion)}><span>{suggestion}</span><ArrowRight size={15} aria-hidden="true" /></button>
               ))}
             </div>
           </div>
         ) : (
-          <div className="overview-chat-transcript" ref={transcriptRef} role="log" aria-live="polite" aria-label="Conversation" aria-busy={busy}>
-            {messages.map((message) => (
-              <article key={message.id} className={`overview-chat-message ${message.role}`}>
-                {message.role === "assistant" && <span className="overview-chat-avatar" aria-hidden="true"><Sparkles size={16} /></span>}
-                <div className="overview-chat-bubble">
-                  <div className="overview-chat-message-top"><strong>{message.role === "user" ? "You" : "Portfolio assistant"}</strong>{message.role === "assistant" && <span className={`overview-chat-state ${message.state ?? "done"}`}>{message.state === "thinking" ? "Working" : message.state === "streaming" ? "Streaming" : message.state === "error" ? "Needs attention" : "Complete"}</span>}</div>
-                  {message.role === "user" && message.metadata.attachmentName && <span className="overview-chat-file"><Paperclip size={13} /> {message.metadata.attachmentName}</span>}
-                  {message.role === "assistant" && (message.activity ?? message.metadata.activity)?.length ? (
-                    <div className="overview-chat-activity" aria-label="Assistant activity">
-                      {(message.activity ?? message.metadata.activity ?? []).map((item, index) => <div key={`${item.id}-${index}`} className={`overview-chat-activity-row ${item.state}`}>
-                        {item.state === "running" ? <LoaderCircle size={14} className="overview-assistant-spinner" /> : item.kind === "tool" ? <FileText size={14} /> : <Sparkles size={14} />}
-                        <span>{item.label}</span>{item.detail && <small>{item.detail}</small>}
-                      </div>)}
-                    </div>
-                  ) : null}
+          <div className="assistant-transcript" ref={transcriptRef} role="log" aria-live="polite" aria-label="Conversation" aria-busy={busy}>
+            {messages.map((message) => {
+              if (message.role === "user") return (
+                <article key={message.id} className="assistant-msg user" aria-label="Your question">
+                  <div className="assistant-user-bubble">
+                    {message.metadata.attachmentName && <span className="assistant-file-chip"><Paperclip size={12} /> {message.metadata.attachmentName}</span>}
+                    {message.content}
+                  </div>
+                </article>
+              );
+              const steps = message.activity ?? message.metadata.activity ?? [];
+              const status = stateLabel(message);
+              const settled = message.state !== "thinking" && message.state !== "error" && message.state !== "streaming";
+              return (
+                <article key={message.id} className="assistant-msg assistant" aria-label="Assistant answer">
+                  {status && <p className="assistant-status"><LoaderCircle size={13} className="overview-assistant-spinner" /> {status}</p>}
+                  {steps.length > 0 && (
+                    <ol className="assistant-steps" aria-label="Steps taken">
+                      {steps.map((item, index) => (
+                        <li key={`${item.id}-${index}`} className={item.state}>
+                          {item.state === "running" ? <LoaderCircle size={13} className="overview-assistant-spinner" /> : <Check size={13} />}
+                          <span>{item.label}</span>
+                          {item.detail && <small>{item.detail}</small>}
+                        </li>
+                      ))}
+                    </ol>
+                  )}
                   {message.metadata.title && <h3>{message.metadata.title}</h3>}
-                  {message.content && <p className="overview-chat-content">{message.content}{message.state === "streaming" && <span className="overview-chat-cursor" aria-hidden="true" />}</p>}
-                  {message.state === "error" && <p className="overview-chat-message-error">{message.error}</p>}
-                  {message.role === "assistant" && message.state !== "thinking" && message.state !== "error" && message.state !== "streaming" && (
+                  {message.content && <p className="assistant-answer">{message.content}{message.state === "streaming" && <span className="overview-chat-cursor" aria-hidden="true" />}</p>}
+                  {message.state === "error" && <p className="assistant-error-line"><CircleAlert size={14} /> {message.error}</p>}
+                  {(message.metadata.backgroundRun?.status === "queued" || message.metadata.backgroundRun?.status === "running") && (
+                    <div className="assistant-msg-actions"><button type="button" className="assistant-link" onClick={() => void cancelInvestigation(message.metadata.backgroundRun!.id)}>Cancel investigation</button></div>
+                  )}
+                  {settled && (
                     <>
-                      {message.metadata.sourceLabels?.length ? <small className="overview-chat-sources">Sources: {message.metadata.sourceLabels.join(", ")}</small> : null}
-                      {message.metadata.limitations?.filter(Boolean).map((item) => <small className="overview-chat-limitation" key={item}>Limit: {item}</small>)}
-                      {message.metadata.suggestedAction && <small className="overview-chat-limitation">Suggested next step: {message.metadata.suggestedAction}</small>}
-                      <div className="overview-chat-message-actions">
-                        <button type="button" onClick={() => void copyAnswer(message)}><Copy size={14} /> {copiedId === message.id ? "Copied" : "Copy"}</button>
-                        {message.metadata.action && <button type="button" onClick={() => message.metadata.action?.caseId ? onOpenCase(message.metadata.action.caseId) : message.metadata.action?.filter ? onFilterCases(message.metadata.action.filter) : onViewCases()}>{message.metadata.action.label} <ArrowRight size={14} /></button>}
+                      {message.metadata.sourceLabels?.length ? (
+                        <div className="assistant-sources"><span>Sources</span>{message.metadata.sourceLabels.map((label) => <em key={label}>{label}</em>)}</div>
+                      ) : null}
+                      {(message.metadata.limitations?.filter(Boolean).length || message.metadata.suggestedAction) ? (
+                        <ul className="assistant-notes">
+                          {message.metadata.limitations?.filter(Boolean).map((item) => <li key={item}><strong>Limit</strong> {item}</li>)}
+                          {message.metadata.suggestedAction && <li><strong>Next step</strong> {message.metadata.suggestedAction}</li>}
+                        </ul>
+                      ) : null}
+                      {message.metadata.proposal && <ActionProposalCard proposal={message.metadata.proposal} canReview={canReviewProposals} onOpenCase={onOpenCase} onReviewed={(proposal) => {
+                        setMessages((current) => current.map((item) => item.metadata.proposal?.id === proposal.id ? { ...item, metadata: { ...item.metadata, proposal } } : item));
+                        if (proposal.status === "approved") onActionApplied?.();
+                        if (activeConversationId) void loadConversation(activeConversationId).catch((failure: unknown) => setError(failure instanceof Error ? failure.message : "Conversation refresh failed."));
+                      }} />}
+                      <div className="assistant-msg-actions">
+                        {message.metadata.action && <button type="button" className="assistant-action" onClick={() => message.metadata.action?.caseId ? onOpenCase(message.metadata.action.caseId) : message.metadata.action?.filter ? onFilterCases(message.metadata.action.filter) : onViewCases()}>{message.metadata.action.label} <ArrowRight size={14} /></button>}
+                        <button type="button" className="assistant-link" onClick={() => void copyAnswer(message)}><Copy size={13} /> {copiedId === message.id ? "Copied" : "Copy"}</button>
                       </div>
                     </>
                   )}
-                </div>
-              </article>
-            ))}
+                </article>
+              );
+            })}
           </div>
         )}
 
-        <form className="overview-assistant-composer" onSubmit={submit}>
+        <form className="assistant-composer" onSubmit={submit}>
           <input ref={fileRef} className="sr-only" type="file" accept=".txt,.csv,text/plain,text/csv" onChange={selectAttachment} tabIndex={-1} aria-label="Choose a text attachment" />
           <label className="sr-only" htmlFor="overview-assistant-question">
             Ask about the current portfolio
           </label>
+          {attachment && (
+            <div className="assistant-attachment">
+              <FileText size={14} /> <span>{attachment.name}</span>
+              <button type="button" aria-label={`Remove ${attachment.name}`} onClick={() => setAttachment(null)} disabled={busy}><X size={13} /></button>
+            </div>
+          )}
           <textarea
             id="overview-assistant-question"
             ref={inputRef}
@@ -454,40 +579,36 @@ export function OverviewAssistant({
             onKeyDown={keyDown}
             maxLength={300}
             rows={1}
-            placeholder="Ask me anything"
+            placeholder="Ask about this portfolio…"
             disabled={busy || loadingHistory}
           />
-          <button
-            className="overview-assistant-send"
-            type="submit"
-            aria-label="Ask question"
-            disabled={busy || loadingHistory || (!question.trim() && !attachment)}
-          >
-            {busy ? <LoaderCircle size={20} className="overview-assistant-spinner" /> : <Send size={21} />}
-          </button>
-          {attachment && (
-            <div className="overview-assistant-attachment">
-              <FileText size={15} /> <span>{attachment.name}</span>
-              <button type="button" aria-label={`Remove ${attachment.name}`} onClick={() => setAttachment(null)} disabled={busy}><X size={14} /></button>
+          <div className="assistant-composer-bar">
+            <div className="assistant-tools">
+              <button type="button" onClick={() => fileRef.current?.click()} disabled={busy || loadingHistory} aria-label="Attach a TXT or CSV file" title="Attach a TXT or CSV file up to 64 KB">
+                <Paperclip size={16} />
+              </button>
+              <button type="button" onClick={startVoiceInput} aria-label={listening ? "Stop voice input" : "Use voice input"} title={listening ? "Stop voice input" : "Voice input"} aria-pressed={listening} disabled={busy || loadingHistory}>
+                <Mic size={16} />
+              </button>
+              {mode === "live" && <button type="button" className="with-label" onClick={() => void startBackgroundInvestigation()} disabled={busy || loadingHistory || !question.trim() || Boolean(attachment)} title="Investigate in the background and return to this conversation later">
+                <Search size={15} /> Investigate
+              </button>}
             </div>
-          )}
-          <div className="overview-assistant-composer-footer">
-            <div>
-              <button type="button" onClick={() => fileRef.current?.click()} disabled={busy || loadingHistory} title="Attach a TXT or CSV file up to 64 KB">
-                <Paperclip size={17} /> Attach
-              </button>
-              <button type="button" onClick={() => void send("Create a portfolio briefing", "briefing")} disabled={busy || loadingHistory}>
-                <FilePlus2 size={17} /> Create
-              </button>
-              <button type="button" onClick={startVoiceInput} aria-label={listening ? "Stop voice input" : "Use voice input"} aria-pressed={listening} disabled={busy || loadingHistory}>
-                <Mic size={18} />
+            <div className="assistant-send-wrap">
+              {question.length >= 240 && <span className="assistant-count">{question.length}/300</span>}
+              <button
+                className="assistant-send"
+                type="submit"
+                aria-label="Ask question"
+                disabled={busy || loadingHistory || (!question.trim() && !attachment)}
+              >
+                {busy ? <LoaderCircle size={17} className="overview-assistant-spinner" /> : <ArrowUp size={17} />}
               </button>
             </div>
-            <span>{question.length}/300</span>
           </div>
         </form>
         {error && <p className="overview-assistant-error" role="alert">{error}</p>}
       </div>
-    </section>
+    </aside>
   );
 }

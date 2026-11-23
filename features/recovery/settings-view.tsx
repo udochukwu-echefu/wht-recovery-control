@@ -92,12 +92,14 @@ export function SettingsView({
   session,
   onNotify,
   onSwitchLive,
+  onSwitchDemo,
   onToggleTheme,
 }: {
   mode: AppMode;
   session: SessionInfo | null;
   onNotify: (message: string) => void;
   onSwitchLive: () => void;
+  onSwitchDemo: () => void;
   onToggleTheme: () => void;
 }) {
   const [section, setSection] = useState<SettingsSection>("general");
@@ -236,10 +238,19 @@ export function SettingsView({
             Manage the live workspace, evidence policy and practitioner access.
           </p>
         </div>
-        <span className="settings-scope">
-          <LockKeyhole size={15} />
-          {session?.workspace.name ?? "Live workspace"}
-        </span>
+        <div className="settings-heading-actions">
+          <span className="settings-scope">
+            <LockKeyhole size={15} />
+            {session?.workspace.name ?? "Live workspace"}
+          </span>
+          <button
+            className="secondary-button"
+            onClick={onSwitchDemo}
+            title="Browse the synthetic demo portfolio. Live records are not changed."
+          >
+            Switch to demo data
+          </button>
+        </div>
       </section>
       <div className="settings-layout">
         <nav className="settings-nav" aria-label="Settings sections">

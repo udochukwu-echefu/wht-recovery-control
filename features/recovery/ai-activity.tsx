@@ -18,6 +18,7 @@ import {
 import { type AppMode } from "./types";
 import { useState, useCallback, useEffect, useMemo } from "react";
 import { CustomSelect } from "./custom-select";
+import { AssistantControls } from "./assistant-controls";
 
 type AiActivityJob = {
   id: string;
@@ -149,6 +150,7 @@ function demoAiActivityJobs(anchor = Date.now()): AiActivityJob[] {
 }
 
 const aiTaskLabels: Record<string, string> = {
+  portfolio_agent: "Portfolio agent",
   portfolio_copilot: "Portfolio copilot",
   case_copilot: "Case copilot",
   recovery_plan: "Recovery plan",
@@ -169,6 +171,12 @@ function aiTaskLabel(taskType: string) {
       .replaceAll("_", " ")
       .replace(/^./, (character) => character.toUpperCase())
   );
+}
+
+function agentToolTrace(output: unknown): Array<{ name: string; detail: string; sourceLabels: string[] }> {
+  if (!output || typeof output !== "object" || !("toolTrace" in output) || !Array.isArray(output.toolTrace)) return [];
+  return output.toolTrace.filter((item): item is { name: string; detail: string; sourceLabels: string[] } =>
+    Boolean(item && typeof item === "object" && typeof item.name === "string" && typeof item.detail === "string" && Array.isArray(item.sourceLabels)));
 }
 
 function aiActivityStatus(job: AiActivityJob): AiActivityStatus {
@@ -238,10 +246,12 @@ export function AiActivityView({
   mode,
   onNotify,
   onOpenCase,
+  onActionApplied,
 }: {
   mode: AppMode;
   onNotify: (message: string) => void;
   onOpenCase: (id: string) => void;
+  onActionApplied?: () => void;
 }) {
   const [jobs, setJobs] = useState<AiActivityJob[]>(() =>
     mode === "demo" ? demoAiActivityJobs() : [],
@@ -389,6 +399,12 @@ export function AiActivityView({
   const medianLatency = latencyValues.length
     ? latencyValues[Math.floor(latencyValues.length / 2)]
     : null;
+  const reviewQueue = rangedJobs
+    .filter((job) => {
+      const status = aiActivityStatus(job);
+      return status === "needs_review" || status === "failed";
+    })
+    .toSorted((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt));
   const validationRate = rangedJobs.length
     ? (validated / rangedJobs.length) * 100
     : 0;
@@ -474,9 +490,10 @@ export function AiActivityView({
       <section className="page-heading ai-activity-heading">
         <div>
           <h1>AI activity</h1>
-          <p>
-            Review automated tasks, validation outcomes, confidence, latency,
-            and human-review events.
+          <p className="ai-governance-line">
+            <ShieldCheck size={15} aria-hidden="true" />
+            AI is assistive. Amounts, matches and status changes stay
+            deterministic or reviewer-controlled.
           </p>
         </div>
         <div className="ai-heading-actions">
@@ -513,38 +530,69 @@ export function AiActivityView({
         </div>
       </section>
 
+      <section className="ai-review-queue" aria-labelledby="ai-review-heading">
+        <div className="ai-review-head">
+          <h2 id="ai-review-heading">Needs your review</h2>
+          {reviewQueue.length > 0 && (
+            <span className="ai-review-count">{reviewQueue.length}</span>
+          )}
+        </div>
+        {loading && !jobs.length ? null : reviewQueue.length ? (
+          <ul>
+            {reviewQueue.slice(0, 5).map((job) => (
+              <li key={job.id}>
+                <AiStatusLabel job={job} />
+                <span className="ai-review-task">
+                  <strong>{aiTaskLabel(job.taskType)}</strong>
+                  <small>
+                    {contextFor(job)} · {formatAiDate(job.createdAt)}
+                  </small>
+                </span>
+                <span className="ai-review-confidence">
+                  {renderConfidence(job)}
+                </span>
+                <button
+                  className="secondary-button"
+                  onClick={() => setSelected(job)}
+                >
+                  Review
+                  <ChevronRight size={15} aria-hidden="true" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="ai-review-empty">
+            <CheckCircle2 size={16} aria-hidden="true" />
+            Nothing needs review in this period.
+          </p>
+        )}
+      </section>
+
       <section
         className="ai-operational-summary"
         aria-label="AI activity summary"
       >
         <div>
-          <strong>{rangedJobs.length}</strong>
-          <span>Recorded tasks</span>
-        </div>
-        <div>
-          <strong>{validated}</strong>
-          <span>Validated</span>
-        </div>
-        <div className="review-summary">
-          <CircleAlert size={17} aria-hidden="true" />
-          <strong>{needsReview}</strong>
-          <span>Needs review</span>
-        </div>
-        <div>
-          <strong>{validationRate.toFixed(1)}%</strong>
           <span>Validation rate</span>
+          <strong>{validationRate.toFixed(1)}%</strong>
+          <small>
+            {validated} of {rangedJobs.length} tasks
+          </small>
         </div>
         <div>
-          <strong>{formatLatency(medianLatency)}</strong>
+          <span>Needs review</span>
+          <strong>{needsReview}</strong>
+          <small>Low confidence or manual check</small>
+        </div>
+        <div>
           <span>Median latency</span>
+          <strong>{formatLatency(medianLatency)}</strong>
+          <small>Across recorded tasks</small>
         </div>
       </section>
-      <p className="ai-governance-note">
-        <ShieldCheck size={16} aria-hidden="true" />
-        AI recommendations are assistive. Amounts, matches, and consequential
-        status changes remain deterministic or reviewer-controlled.
-      </p>
 
+      {mode === "live" && <AssistantControls onOpenCase={onOpenCase} onActionApplied={onActionApplied} />}
       <section
         className="ai-activity-workspace"
         aria-labelledby="activity-log-heading"
@@ -650,9 +698,11 @@ export function AiActivityView({
               Clear filters
             </button>
           )}
-          <span className="ai-visible-count" aria-live="polite">
-            Showing {visibleJobs.length} of {filteredJobs.length}
-          </span>
+          {visibleJobs.length < filteredJobs.length && (
+            <span className="ai-visible-count" aria-live="polite">
+              Showing {visibleJobs.length} of {filteredJobs.length}
+            </span>
+          )}
         </div>
 
         {loading ? (
@@ -972,6 +1022,20 @@ export function AiActivityView({
                 </p>
               )}
             </section>
+            {agentToolTrace(selected.output).length > 0 && (
+              <section>
+                <h3>Tools used</h3>
+                <ul className="ai-source-list">
+                  {agentToolTrace(selected.output).map((tool, index) => (
+                    <li key={`${tool.name}-${index}`}>
+                      <strong>{tool.name.replaceAll("_", " ")}</strong>
+                      <span>{tool.detail}</span>
+                      <code>{tool.sourceLabels.join(", ")}</code>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
             {selected.output !== undefined && (
               <section>
                 <h3>Output summary</h3>
