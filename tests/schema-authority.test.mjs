@@ -11,6 +11,15 @@ test("versioned migrations are the only runtime schema authority", async () => {
       "app/api/review/route.ts",
       "app/api/audit/route.ts",
       "lib/ai/service.ts",
+      "lib/ai/portfolio-agent.ts",
+      "lib/ai/agent-runs.ts",
+      "lib/ai/recurring-followups.ts",
+      "lib/communications/delivery.ts",
+      "app/api/assistant/proposals/route.ts",
+      "app/api/assistant/runs/route.ts",
+      "app/api/assistant/schedules/route.ts",
+      "app/api/assistant/deliveries/route.ts",
+      "worker/assistant-workflow.ts",
     ].map((path) => readFile(new URL(`../${path}`, import.meta.url), "utf8"))),
   ]);
   const scripts = JSON.parse(packageJson).scripts;

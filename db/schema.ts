@@ -194,6 +194,92 @@ export const assistantMessages = sqliteTable(
   (table) => [index("idx_assistant_messages_conversation_id").on(table.conversationId, table.id)],
 );
 
+export const assistantActionProposals = sqliteTable(
+  "assistant_action_proposals",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id").notNull(),
+    clientId: text("client_id").notNull(),
+    conversationId: text("conversation_id").notNull().references(() => assistantConversations.id),
+    aiJobId: text("ai_job_id").notNull(),
+    caseId: text("case_id").notNull(),
+    caseUpdatedAt: text("case_updated_at").notNull(),
+    actionType: text("action_type").notNull(),
+    payloadJson: text("payload_json").notNull(),
+    sourceLabelsJson: text("source_labels_json").notNull().default("[]"),
+    status: text("status").notNull().default("pending"),
+    proposedByUserId: text("proposed_by_user_id").notNull(),
+    reviewedByUserId: text("reviewed_by_user_id"),
+    reviewerNote: text("reviewer_note"),
+    decisionId: text("decision_id"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    reviewedAt: text("reviewed_at"),
+  },
+  (table) => [
+    index("idx_assistant_proposals_conversation").on(table.conversationId, table.createdAt),
+    index("idx_assistant_proposals_case_status").on(table.caseId, table.status),
+    index("idx_assistant_proposals_scope_status").on(table.workspaceId, table.clientId, table.status, table.createdAt),
+  ],
+);
+
+export const assistantRecurringSchedules = sqliteTable("assistant_recurring_schedules", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull(), clientId: text("client_id").notNull(),
+  conversationId: text("conversation_id").notNull().references(() => assistantConversations.id), userId: text("user_id").notNull(), caseId: text("case_id").notNull(),
+  question: text("question").notNull(), startsAt: text("starts_at").notNull(), everyDays: integer("every_days").notNull(), endsAt: text("ends_at").notNull(),
+  approvalProposalId: text("approval_proposal_id").notNull().unique().references(() => assistantActionProposals.id), approvedByUserId: text("approved_by_user_id").notNull(),
+  status: text("status").notNull().default("active"), nextRunAt: text("next_run_at"), lastOccurrenceId: text("last_occurrence_id"), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
+}, (table) => [index("idx_recurring_schedules_due").on(table.status, table.nextRunAt), index("idx_recurring_schedules_scope").on(table.workspaceId, table.clientId, table.createdAt)]);
+
+export const assistantScheduleEvents = sqliteTable("assistant_schedule_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }), eventKey: text("event_key").notNull().unique(), scheduleId: text("schedule_id").notNull().references(() => assistantRecurringSchedules.id),
+  workspaceId: text("workspace_id").notNull(), clientId: text("client_id").notNull(), eventType: text("event_type").notNull(), payloadJson: text("payload_json").notNull(), createdAt: text("created_at").notNull(),
+}, (table) => [index("idx_schedule_events_schedule").on(table.scheduleId, table.id)]);
+
+export const assistantAgentRuns = sqliteTable(
+  "assistant_agent_runs",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id").notNull(),
+    clientId: text("client_id").notNull(),
+    conversationId: text("conversation_id").notNull().references(() => assistantConversations.id),
+    userId: text("user_id").notNull(),
+    userMessageId: integer("user_message_id").notNull(),
+    assistantMessageId: integer("assistant_message_id").notNull(),
+    question: text("question").notNull(),
+    caseId: text("case_id"),
+    scheduledFor: text("scheduled_for"),
+    approvalProposalId: text("approval_proposal_id"),
+    recurringScheduleId: text("recurring_schedule_id").references(() => assistantRecurringSchedules.id),
+    dispatchedAt: text("dispatched_at"),
+    dispatchAttempts: integer("dispatch_attempts").notNull().default(0),
+    status: text("status").notNull().default("queued"),
+    progressJson: text("progress_json").notNull().default("[]"),
+    errorMessage: text("error_message"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    completedAt: text("completed_at"),
+  },
+  (table) => [
+    index("idx_assistant_runs_conversation").on(table.conversationId, table.createdAt),
+    index("idx_assistant_runs_scope_created").on(table.workspaceId, table.clientId, table.createdAt),
+    index("idx_assistant_runs_dispatch").on(table.status, table.dispatchedAt, table.dispatchAttempts),
+    uniqueIndex("uq_assistant_followup_approval").on(table.approvalProposalId).where(sql`${table.approvalProposalId} IS NOT NULL`),
+    uniqueIndex("uq_recurring_run_occurrence").on(table.recurringScheduleId, table.scheduledFor).where(sql`${table.recurringScheduleId} IS NOT NULL`),
+  ],
+);
+
+export const assistantRunEvents = sqliteTable("assistant_run_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  eventKey: text("event_key").notNull().unique(),
+  runId: text("run_id").notNull().references(() => assistantAgentRuns.id),
+  workspaceId: text("workspace_id").notNull(),
+  clientId: text("client_id").notNull(),
+  attempt: integer("attempt").notNull().default(0),
+  eventType: text("event_type").notNull(),
+  payloadJson: text("payload_json").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [index("idx_assistant_run_events_run").on(table.runId, table.id)]);
+
 export const ledgerImports = sqliteTable(
   "ledger_imports",
   {
@@ -321,6 +407,15 @@ export const communicationDrafts = sqliteTable(
   },
   (table) => [index("idx_communication_drafts_case_created").on(table.caseId, table.createdAt)],
 );
+
+export const communicationDeliveries = sqliteTable("communication_deliveries", {
+  id: text("id").primaryKey(), workspaceId: text("workspace_id").notNull(), clientId: text("client_id").notNull(), caseId: text("case_id").notNull(),
+  draftId: text("draft_id").notNull().references(() => communicationDrafts.id), draftVersion: integer("draft_version").notNull(), caseUpdatedAt: text("case_updated_at").notNull(),
+  fromAddress: text("from_address").notNull(), toAddress: text("to_address").notNull(), subject: text("subject").notNull(), body: text("body").notNull(),
+  status: text("status").notNull().default("pending"), requestedByUserId: text("requested_by_user_id").notNull(), reviewedByUserId: text("reviewed_by_user_id"),
+  reviewerNote: text("reviewer_note"), decisionId: text("decision_id"), providerMessageId: text("provider_message_id"), errorMessage: text("error_message"),
+  createdAt: text("created_at").notNull(), reviewedAt: text("reviewed_at"), attemptedAt: text("attempted_at"), completedAt: text("completed_at"),
+}, (table) => [index("idx_deliveries_scope_created").on(table.workspaceId, table.clientId, table.createdAt), uniqueIndex("uq_draft_unresolved_delivery").on(table.draftId).where(sql`${table.status} IN ('pending','sending','accepted','unknown')`)]);
 
 export const users = sqliteTable("users", {
   id: text("id").primaryKey(),

@@ -14,7 +14,9 @@
   },
   "vars": {
     "AI_PROVIDER": "deepseek",
-    "DEEPSEEK_MODEL": "deepseek-v4-flash"
+    "DEEPSEEK_MODEL": "deepseek-flash",
+    "EMAIL_DELIVERY_ENABLED": "false",
+    "EMAIL_FROM": ""
   },
   "d1_databases": [
     {
@@ -23,5 +25,15 @@
       "database_id": "0e28b669-3102-4f83-80c5-d31fcbcc86d7",
       "migrations_dir": "drizzle"
     }
-  ]
+  ],
+  "workflows": [
+    {
+      "name": "wht-assistant-investigation",
+      "binding": "ASSISTANT_WORKFLOW",
+      "class_name": "AssistantInvestigationWorkflow"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  }
 }

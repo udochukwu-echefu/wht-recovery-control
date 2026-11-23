@@ -1,6 +1,10 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import { recoverUndispatchedRuns } from "@/lib/ai/agent-runs";
+import { tickRecurringSchedules } from "@/lib/ai/recurring-followups";
+import { recoverInterruptedDeliveries } from "@/lib/communications/delivery";
+export { AssistantInvestigationWorkflow } from "./assistant-workflow";
 
 type WorkerEnv = Env & {
   ASSETS: Fetcher;
@@ -20,6 +24,13 @@ type WorkerEnv = Env & {
 // const imageConfig: ImageConfig = { dangerouslyAllowSVG: true };
 
 const worker = {
+  async scheduled(_controller: ScheduledController, env: WorkerEnv, ctx: ExecutionContext) {
+    ctx.waitUntil((async()=>{
+      await tickRecurringSchedules(env);
+      await recoverUndispatchedRuns(env);
+      await recoverInterruptedDeliveries(env.DB);
+    })());
+  },
   async fetch(request: Request, env: WorkerEnv, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const publicDemoHost = url.hostname.endsWith(".workers.dev");

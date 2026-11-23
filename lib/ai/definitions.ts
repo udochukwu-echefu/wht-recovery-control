@@ -293,7 +293,9 @@ function validatePortfolioCopilot(value: unknown, input: GenericInput): Portfoli
   if (!isRecord(value)) throw new Error("Portfolio copilot response must be an object.");
   assertExactKeys(value, ["answer", "sourceLabels", "limitations", "suggestedAction"], "Portfolio copilot response");
   const sourceLabels = stringArray(value.sourceLabels, "sourceLabels", 2);
-  const allowed = new Set(["portfolio.current", ...(input.attachmentText ? ["attachment.text"] : [])]);
+  const allowed = new Set(Array.isArray(input.allowedSourceLabels)
+    ? input.allowedSourceLabels.filter((label): label is string => typeof label === "string")
+    : ["portfolio.current", ...(input.attachmentText ? ["attachment.text"] : [])]);
   if (sourceLabels.some((label) => !allowed.has(label))) throw new Error("Portfolio copilot cites an unavailable source.");
   const limitations = stringArray(value.limitations, "limitations", 8);
   if (input.portfolioLimited && !limitations.some((item) => item.includes("500 most recently updated cases"))) {

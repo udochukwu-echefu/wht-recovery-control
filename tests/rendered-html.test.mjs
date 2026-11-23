@@ -82,7 +82,7 @@ test("AI provider abstraction keeps a deterministic demo and manual fallback", a
   assert.match(providers, /DeepSeekAiProvider/);
   assert.match(contracts, /candidate_ranking/);
   assert.match(contracts, /case_copilot/);
-  assert.match(environment, /DEEPSEEK_MODEL=deepseek-v4-flash/);
+  assert.match(environment, /DEEPSEEK_MODEL=deepseek-flash/);
   assert.match(environment, /AI_PROVIDER=auto/);
 });
 

@@ -84,7 +84,7 @@ function demoReviewData(recoveryCase: RecoveryCase): ReviewData {
       fileName: `${recoveryCase.invoice}-wht-receipt.pdf`,
       sha256:
         "4eab7f69a37241bbbc9f4c909d8feef4769cc89bd5f560673a118f1349072b91",
-      aiModel: "deepseek-v4-flash",
+      aiModel: "deepseek-flash",
       aiResponseId: "resp_demo_0731",
       createdAt: new Date().toISOString(),
     },

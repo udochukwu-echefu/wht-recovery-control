@@ -22,7 +22,7 @@ export function getD1() {
 export function getDeepSeekConfig() {
   return {
     apiKey: env.DEEPSEEK_API_KEY?.trim() ?? "",
-    model: env.DEEPSEEK_MODEL?.trim() || "deepseek-v4-flash",
+    model: env.DEEPSEEK_MODEL?.trim() || "deepseek-flash",
   };
 }
 

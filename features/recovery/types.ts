@@ -175,6 +175,7 @@ export type PersistentCase = {
   confidence: number;
   sourceDocumentId: string | null;
   updatedAt: string;
+  createdAt?: string;
   nextAction?: string | null;
   assignedOwnerId?: string | null;
   authorityConnected?: number | boolean;

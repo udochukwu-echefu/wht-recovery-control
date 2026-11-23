@@ -27,7 +27,7 @@ Copy `.env.example` to `.env` for local development. Secrets stay server-side.
 
 ```dotenv
 DEEPSEEK_API_KEY=your-secret
-DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_MODEL=deepseek-flash
 AI_PROVIDER=auto
 ```
 
@@ -35,6 +35,8 @@ AI_PROVIDER=auto
 
 Production identity is derived from trusted `oai-authenticated-user-*` proxy headers. Production requests without an identity fail closed. Localhost receives an isolated local-development account so the live workflow can be tested without an identity proxy.
 Identity bootstrap records are created only on first use; normal authenticated requests perform membership resolution without rewriting bootstrap rows.
+
+External email uses Resend and is disabled by default. Set the server secret `RESEND_API_KEY`, a verified `EMAIL_FROM` address and `EMAIL_DELIVERY_ENABLED=true` only in the intended WHT environment. No sender domain or shared credential from another project is configured. Every message still needs a separate human approval of its exact sender, recipient, subject and body; approving a draft or recurring follow-up never sends it. Timeout or uncertain acceptance blocks automatic retry.
 
 ## Controlled workflow
 
@@ -89,7 +91,11 @@ AI inputs are assembled from workspace-scoped server records. Browser case narra
 
 The OCR abstraction currently supports embedded/reviewer-supplied text and an explicit manual-review fallback. A production image/PDF OCR provider is not configured. The original document remains retained and the UI reports that manual entry is required.
 
-AI jobs persist status, prompt version, input hash, attempts, retry/lease metadata, validation result, latency and reviewer corrections. Calls currently execute synchronously in the request; a production queue/consumer for crash-safe deferred execution remains required before high-volume use.
+AI jobs persist status, prompt version, input hash, attempts, retry/lease metadata, validation result, latency and reviewer corrections. Short chat questions execute in the request. Longer investigations use a Cloudflare Workflow and persist progress so the chat can reconnect after a browser disconnect.
+
+Live Overview chat uses a bounded agent loop. The configured DeepSeek model chooses among server-validated portfolio, case, evidence and deterministic-check tools; every tool query uses the authenticated workspace and client. The final answer must cite tool results actually inspected. Tool activity is shown in chat and recorded with the AI job. An admin, practitioner or reviewer can ask it to **prepare** a case note, assignment, priority, due date, open checklist item, correspondence draft, or scheduled internal follow-up. Chat and AI activity show the exact effects and sources for a separate human approval or rejection. Approval verifies the displayed preview hash, rechecks current permissions and case version, then applies once with an audit event; rejection applies no proposed effects. Correspondence approval retains a draft without sending it. Approved one-time follow-ups sleep until the selected timestamp, inspect only that case, and return findings in the original conversation. Background investigations remain read-only, can be canceled, and resume in chat after a disconnect. Reviewers can inspect other users' complete new run histories in the active client, including retries, failed tools and cancellation. A five-minute cron recovers interrupted dispatches using the same Workflow instance ID. The public synthetic demo remains local and does not call the live agent. See [the agentic assistant plan](docs/AGENTIC-ASSISTANT-PLAN.md).
+
+Recurring follow-ups require one explicit approval of the case, question, first run, interval and expiry. Each occurrence is read-only and retains its run history. Pause and revoke stop future work; changes and resuming require a fresh approval. Requester or approving reviewer access loss suspends the permission, and restored access does not resume it automatically. The scheduler skips missed intervals without launching a backlog. AI activity also exposes a separate exact email permission flow for approved drafts; the agent cannot call the sender.
 
 ## Commands
 
@@ -108,9 +114,12 @@ Do not apply remote migrations or deploy without reviewing the target account, a
 
 - No direct tax-authority integration or filing submission
 - No production OCR provider
-- No outbound email/SMS delivery; drafts are reviewed and external correspondence is recorded manually
-- No background queue consumer yet; persisted AI jobs are request-executed
+- Resend email delivery is implemented behind separate exact human permission, but has no configured sender or production credential; sending is disabled. SMS and inbound delivery processing are not implemented
+- Background Workflows cover investigations and approved one-time or recurring internal follow-ups; bulk AI jobs are not implemented
+- Older assistant runs retain surviving history snapshots; details previously discarded cannot be reconstructed
 - Audit packs are canonical JSON, not signed PDF bundles
 - Tax rates and procedures require Nigerian practitioner validation before approval
+
+Review migrations `0007`–`0010`, the `ASSISTANT_WORKFLOW` export/binding and the scheduler/recovery cron before deployment. See [the current agentic verification record](docs/AGENTIC-ASSISTANT-VERIFICATION.md).
 
 Sample inputs are in `tests/fixtures/`. The practitioner brief used to shape the control boundaries is external reference material and is not bundled into the application.

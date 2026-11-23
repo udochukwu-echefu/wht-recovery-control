@@ -1,7 +1,8 @@
 import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { assistantConversations, assistantMessages } from "@/db/schema";
+import { assistantActionProposals, assistantConversations, assistantMessages } from "@/db/schema";
 import { apiError, enforceRateLimit, requireContext } from "@/lib/auth";
+import { proposalPreview } from "@/lib/ai/action-proposals";
 
 export const runtime = "edge";
 
@@ -20,10 +21,25 @@ export async function GET(request: Request) {
     const active = requestedId ? conversations.find((item) => item.id === requestedId) : conversations[0];
     if (requestedId && !active) return Response.json({ error: "Conversation not found." }, { status: 404 });
     const rows = active ? await db.select().from(assistantMessages).where(eq(assistantMessages.conversationId, active.id)).orderBy(desc(assistantMessages.id)).limit(100) : [];
+    const proposals = active ? await db.select().from(assistantActionProposals).where(and(
+      eq(assistantActionProposals.conversationId, active.id),
+      eq(assistantActionProposals.workspaceId, context.workspace.id),
+      eq(assistantActionProposals.clientId, context.clientId),
+    )).limit(100) : [];
+    const previews = await Promise.all(proposals.map(proposalPreview));
+    const proposalStatus = new Map(previews.map((proposal) => [proposal.id, proposal]));
     return Response.json({
       conversations: conversations.map((item) => ({ id: item.id, title: item.title, updatedAt: item.updatedAt })),
       activeId: active?.id ?? null,
-      messages: rows.reverse().map((item) => ({ id: String(item.id), role: item.role, content: item.content, metadata: JSON.parse(item.metadataJson), createdAt: item.createdAt })),
+      messages: rows.reverse().map((item) => {
+        const metadata = JSON.parse(item.metadataJson) as Record<string, unknown>;
+        const proposal = metadata.proposal as { id?: string } | undefined;
+        const current = proposal?.id ? proposalStatus.get(proposal.id) : undefined;
+        if (current && proposal) metadata.proposal = current;
+        const backgroundRun = metadata.backgroundRun as { status?: string } | undefined;
+        const state = backgroundRun?.status === "queued" || backgroundRun?.status === "running" ? "thinking" : backgroundRun?.status === "failed" || backgroundRun?.status === "canceled" ? "error" : "done";
+        return { id: String(item.id), role: item.role, content: item.content, metadata, state, error: state === "error" ? String(metadata.error ?? "The investigation did not finish.") : undefined, createdAt: item.createdAt };
+      }),
     });
   } catch (error) {
     return apiError(error, "Conversations are temporarily unavailable.");

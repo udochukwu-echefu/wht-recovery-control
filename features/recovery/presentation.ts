@@ -43,7 +43,7 @@ export function persistentCaseToView(item: PersistentCase): RecoveryCase {
     age: Math.max(
       0,
       Math.floor(
-        (Date.now() - new Date(item.updatedAt).getTime()) / 86_400_000,
+        (Date.now() - new Date(item.createdAt ?? item.updatedAt).getTime()) / 86_400_000,
       ),
     ),
     owner: item.assignedOwnerId || "Unassigned",

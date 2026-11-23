@@ -1,7 +1,8 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import { assistantConversations, assistantMessages, recoveryCases } from "@/db/schema";
-import type { PortfolioBriefingOutput, PortfolioCopilotOutput } from "@/lib/ai/contracts";
+import type { PortfolioBriefingOutput } from "@/lib/ai/contracts";
+import { runPortfolioAgent } from "@/lib/ai/portfolio-agent";
 import { runAiTask } from "@/lib/ai/service";
 import { ApiError, apiError, auditStatement, enforceRateLimit, requireContext } from "@/lib/auth";
 import { validateUpload } from "@/lib/storage";
@@ -72,21 +73,26 @@ export async function POST(request: Request) {
             emit({ type: "tool", id: "attachment", label: "Read text attachment", state: "complete", detail: attachmentName });
           }
 
-          emit({ type: "tool", id: "portfolio", label: "Load current portfolio", state: "running" });
-          const rows = await db.select().from(recoveryCases).where(and(
-            eq(recoveryCases.workspaceId, context.workspace.id),
-            eq(recoveryCases.clientId, context.clientId),
-          )).orderBy(desc(recoveryCases.updatedAt)).limit(501);
-          const cases = rows.slice(0, 500);
-          emit({ type: "tool", id: "portfolio", label: "Load current portfolio", state: "complete", detail: `${cases.length} cases` });
-
           const isBriefing = action === "briefing" && !attachmentText;
           const userText = action === "briefing" ? "Create a portfolio briefing" : question;
-          let input: Record<string, unknown>;
+          let text: string;
+          let task: string;
+          let jobId: string;
+          let provider: string;
+          let baseMetadata: Record<string, unknown>;
+          let toolNames: string[] = [];
           if (isBriefing) {
+            emit({ type: "tool", id: "portfolio", label: "Load current portfolio", state: "running" });
+            const rows = await db.select().from(recoveryCases).where(and(
+              eq(recoveryCases.workspaceId, context.workspace.id),
+              eq(recoveryCases.clientId, context.clientId),
+              sql`${recoveryCases.deletedAt} is null`,
+            )).orderBy(desc(recoveryCases.updatedAt)).limit(501);
+            const cases = rows.slice(0, 500);
+            emit({ type: "tool", id: "portfolio", label: "Load current portfolio", state: "complete", detail: `${cases.length} cases` });
             const intervention = cases.filter((item) => item.stage === "evidence-needed" || item.stage === "in-dispute");
             const largest = intervention.toSorted((a, b) => b.expectedWhtKobo - a.expectedWhtKobo)[0];
-            input = {
+            const input = {
               caseIds: cases.map((item) => item.id),
               interventionCount: intervention.length,
               interventionFormatted: `₦${(intervention.reduce((sum, item) => sum + item.expectedWhtKobo, 0) / 100).toLocaleString("en-NG", { maximumFractionDigits: 0 })}`,
@@ -96,44 +102,50 @@ export async function POST(request: Request) {
               largestCaseId: largest?.id ?? "",
               dataQualityWarning: `${cases.filter((item) => item.confidence < 70).length} cases have evidence confidence below 70%.${rows.length > 500 ? " This briefing covers only the 500 most recently updated cases." : ""}`,
             };
+            const result = await runAiTask<PortfolioBriefingOutput>({
+              type: "portfolio_briefing",
+              input,
+              workspaceId: context.workspace.id,
+              clientId: context.clientId,
+              requestedByUserId: context.user.id,
+              onProgress: (phase) => {
+                if (phase === "provider") emit({ type: "status", phase: "thinking", label: "Generating a grounded response" });
+                if (phase === "validation") emit({ type: "status", phase: "validating", label: "Checking sources and response structure" });
+                if (phase === "recorded") emit({ type: "status", phase: "saving", label: "Recording the AI activity" });
+              },
+            });
+            if (!result.output) throw new ApiError(422, result.safeMessage ?? "Assistant output requires manual review.");
+            task = "portfolio_briefing";
+            jobId = result.jobId;
+            provider = result.provider;
+            text = result.output.narrative;
+            baseMetadata = { title: "Portfolio briefing draft", sourceLabels: result.output.sourceLabels, suggestedAction: result.output.dataQualityWarning, action: { label: "Review intervention cases", filter: "needs-intervention" }, aiJobId: jobId };
           } else {
             const prior = await db.select({ role: assistantMessages.role, content: assistantMessages.content }).from(assistantMessages).where(eq(assistantMessages.conversationId, conversation.id)).orderBy(desc(assistantMessages.id)).limit(12);
-            input = {
+            const result = await runPortfolioAgent({
+              context,
+              conversationId: conversation.id,
               question: action === "briefing" ? "Create a portfolio briefing using the current cases and attached text." : question,
-              conversation: prior.reverse(),
-              portfolioLimited: rows.length > 500,
-              cases: cases.map((item) => ({ id: item.id, customer: item.customer, amountKobo: item.expectedWhtKobo, stage: item.stage, exceptionCode: item.exceptionCode, priority: item.priority, dueDate: item.dueDate, nextAction: item.nextAction })),
-              ...(attachmentText ? { attachmentName, attachmentText } : {}),
-            };
+              history: prior.reverse(),
+              attachment: attachmentText ? { name: attachmentName, text: attachmentText } : undefined,
+              onStatus: (label) => emit({ type: "status", phase: "investigating", label }),
+              onTool: (event) => emit({ type: "tool", ...event }),
+            });
+            task = "portfolio_agent";
+            jobId = result.jobId;
+            provider = result.provider;
+            text = result.output.answer;
+            toolNames = result.toolTrace.map((item) => item.name);
+            baseMetadata = { ...(action === "briefing" ? { title: "Portfolio briefing draft" } : {}), sourceLabels: result.output.sourceLabels, limitations: result.output.limitations, suggestedAction: result.output.suggestedAction, action: { label: "View recovery cases" }, aiJobId: jobId, ...(result.proposal ? { proposal: result.proposal } : {}) };
           }
-
-          const task = isBriefing ? "portfolio_briefing" : "portfolio_copilot";
-          const result = await runAiTask<PortfolioBriefingOutput | PortfolioCopilotOutput>({
-            type: task,
-            input,
-            workspaceId: context.workspace.id,
-            clientId: context.clientId,
-            requestedByUserId: context.user.id,
-            onProgress: (phase) => {
-              if (phase === "provider") emit({ type: "status", phase: "thinking", label: "Generating a grounded response" });
-              if (phase === "validation") emit({ type: "status", phase: "validating", label: "Checking sources and response structure" });
-              if (phase === "recorded") emit({ type: "status", phase: "saving", label: "Recording the AI activity" });
-            },
-          });
-          if (!result.output) throw new ApiError(422, result.safeMessage ?? "Assistant output requires manual review.");
-          const output = result.output;
-          const text = isBriefing ? (output as PortfolioBriefingOutput).narrative : (output as PortfolioCopilotOutput).answer;
-          const baseMetadata = isBriefing
-            ? { title: "Portfolio briefing draft", sourceLabels: (output as PortfolioBriefingOutput).sourceLabels, suggestedAction: (output as PortfolioBriefingOutput).dataQualityWarning, action: { label: "Review intervention cases", filter: "needs-intervention" }, aiJobId: result.jobId }
-            : { ...(action === "briefing" ? { title: "Portfolio briefing draft" } : {}), sourceLabels: (output as PortfolioCopilotOutput).sourceLabels, limitations: (output as PortfolioCopilotOutput).limitations, suggestedAction: (output as PortfolioCopilotOutput).suggestedAction, action: { label: "View recovery cases" }, aiJobId: result.jobId };
           emit({ type: "status", phase: "saving", label: "Saving conversation" });
           const metadata = { ...baseMetadata, activity: activity.map((item) => ({ ...item, state: "complete" as const })) };
           const now = new Date().toISOString();
           const title = conversation.title === "New conversation" ? userText.slice(0, 72) : conversation.title;
-          await auditStatement(context, { eventType: `AI_${task.toUpperCase()}_GENERATED`, actor: "ai-assistant", detail: { jobId: result.jobId, conversationId: conversation.id, provider: result.provider, consequentialActionTaken: false, sourceGroundedOnServer: true } }).run();
+          await auditStatement(context, { eventType: `AI_${task.toUpperCase()}_GENERATED`, actor: "ai-assistant", detail: { jobId, conversationId: conversation.id, provider, toolNames, consequentialActionTaken: false, sourceGroundedOnServer: true } }).run();
           await db.batch([
             db.insert(assistantMessages).values({ conversationId: conversation.id, role: "user", content: userText, metadataJson: JSON.stringify({ attachmentName: attachmentName || undefined }), createdAt: now }),
-            db.insert(assistantMessages).values({ conversationId: conversation.id, role: "assistant", content: text, metadataJson: JSON.stringify(metadata), aiJobId: result.jobId, createdAt: now }),
+            db.insert(assistantMessages).values({ conversationId: conversation.id, role: "assistant", content: text, metadataJson: JSON.stringify(metadata), aiJobId: jobId, createdAt: now }),
             db.update(assistantConversations).set({ title, updatedAt: now }).where(eq(assistantConversations.id, conversation.id)),
           ]);
           emit({ type: "answer_start" });
