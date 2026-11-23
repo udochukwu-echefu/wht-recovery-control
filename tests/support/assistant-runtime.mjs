@@ -1,4 +1,3 @@
-import { build } from "esbuild";
 import { createRequire } from "node:module";
 import { readFile, readdir, mkdtemp, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -6,10 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { consumeChatStream } from "../../lib/ai/chat-stream.ts";
 
-// Use the runtime pinned by the deployment CLI, rather than the older runtime
-// independently bundled by Vite's Cloudflare plugin.
+// Use the runtime and bundler pinned by the deployment CLI, rather than the older
+// runtime bundled by Vite's Cloudflare plugin. esbuild is not a direct
+// dependency of this project, so it is resolved through Wrangler as well.
 const require = createRequire(import.meta.url);
-const { Miniflare, convertV4MiniflareOptions, Response: RuntimeResponse, FormData: RuntimeFormData } = createRequire(require.resolve("wrangler/package.json"))("miniflare");
+const requireFromWrangler = createRequire(require.resolve("wrangler/package.json"));
+const { Miniflare, convertV4MiniflareOptions, Response: RuntimeResponse, FormData: RuntimeFormData } = requireFromWrangler("miniflare");
+const { build } = requireFromWrangler("esbuild");
 
 let bundle;
 export const call = (name, args, id = `call-${crypto.randomUUID()}`) => ({ content: null, tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(args) } }] });

@@ -108,16 +108,24 @@ export function Home() {
   const [assistantOpen, setAssistantOpen] = useState(false);
   const ledgerInputRef = useRef<HTMLInputElement>(null);
   const evidenceInputRef = useRef<HTMLInputElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const toggleAssistant = (event: globalThis.KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "j") {
+    const handleShortcut = (event: globalThis.KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey)) return;
+      const key = event.key.toLowerCase();
+      if (key === "j") {
         event.preventDefault();
         setAssistantOpen((value) => !value);
+      } else if (key === "k") {
+        // The search field advertises ⌘K.
+        event.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
       }
     };
-    window.addEventListener("keydown", toggleAssistant);
-    return () => window.removeEventListener("keydown", toggleAssistant);
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
   }, []);
 
   useEffect(() => {
@@ -889,6 +897,7 @@ export function Home() {
             <label className="command-field">
               <Search size={16} />
               <input
+                ref={searchInputRef}
                 value={globalQuery}
                 onChange={(event) => setGlobalQuery(event.target.value)}
                 onKeyDown={(event) => {

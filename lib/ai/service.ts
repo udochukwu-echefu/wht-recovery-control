@@ -22,8 +22,8 @@ export async function runAiTask<TOutput>({
   input,
   caseId,
   documentId,
-  workspaceId = "pilot-workspace",
-  clientId = "local-client",
+  workspaceId,
+  clientId,
   requestedByUserId,
   providerMode,
   onProgress,
@@ -32,8 +32,9 @@ export async function runAiTask<TOutput>({
   input: Record<string, unknown>;
   caseId?: string;
   documentId?: string;
-  workspaceId?: string;
-  clientId?: string;
+  /** Every AI job is recorded under the caller's authenticated tenant; there is no fallback. */
+  workspaceId: string;
+  clientId: string;
   requestedByUserId?: string;
   providerMode?: string;
   onProgress?: (phase: "provider" | "validation" | "recorded") => void | Promise<void>;

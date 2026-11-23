@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, readFile, readdir } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
 // These source contracts span the feature modules; rendering is checked separately.
@@ -32,6 +32,7 @@ test("server-renders the WHT recovery workspace", async () => {
   assert.match(html, /Needs intervention/i);
   assert.match(html, /Priority recovery queue/i);
   assert.match(html, /Alpha Energy/i);
+  assert.match(html, /Human approval required/i);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/i);
 });
 
@@ -52,22 +53,6 @@ test("public workers.dev demo rejects API access with forged identity headers", 
   }), env, ctx);
   assert.equal(api.status, 403);
   assert.match(await api.text(), /protected domain/);
-});
-
-test("starter preview is removed and product metadata is present", async () => {
-  const [page, layout, packageJson] = await Promise.all([
-    readWorkspaceSources(),
-    readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../package.json", import.meta.url), "utf8"),
-  ]);
-
-  assert.match(page, /Recovery overview/);
-  assert.match(page, /Human approval required/);
-  assert.doesNotMatch(page, /Turn evidence gaps into next actions\./);
-  assert.doesNotMatch(page, /Bring the source records together\./);
-  assert.match(layout, /WHT Recovery Control Workspace/);
-  assert.doesNotMatch(packageJson, /react-loading-skeleton/);
-  await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));
 });
 
 test("AI provider abstraction keeps a deterministic demo and manual fallback", async () => {

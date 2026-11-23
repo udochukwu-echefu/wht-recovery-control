@@ -2,7 +2,7 @@
 
 | Requirement | Implementation | Status |
 | --- | --- | --- |
-| Demo/live separation | Explicit selector and banner in `features/recovery/workspace.tsx`; live lists replace rather than merge demo data | Implemented |
+| Demo/live separation | Demo banner with "Open live workspace" and a "Switch to demo data" action in live Settings (`features/recovery/workspace.tsx`, `settings-view.tsx`); live lists replace rather than merge demo data | Implemented |
 | Auth, workspaces and RBAC | `lib/auth.ts`, `/api/session`, workspace columns and scoped route predicates | Implemented; production proxy configuration required |
 | Workspace settings | `/api/settings` plus live identity, evidence governance, access, AI/security and appearance UI | Implemented; invitations remain intentionally unavailable |
 | D1 document storage without R2 | `lib/storage.ts`, `/api/files`, quotas/hash/MIME/signature/retention metadata | Implemented for the 1 MB default |

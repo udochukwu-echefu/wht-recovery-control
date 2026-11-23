@@ -19,8 +19,6 @@ export const aiTaskTypes = [
 ] as const;
 
 export type AiTaskType = (typeof aiTaskTypes)[number];
-export type AiTaskStatus =
-  "queued" | "processing" | "completed" | "failed" | "manual_review";
 export type SourceReference = {
   type: "case_field" | "document" | "audit_event" | "aggregate" | "rule";
   id: string;

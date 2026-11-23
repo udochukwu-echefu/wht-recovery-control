@@ -1,34 +1,27 @@
 import assert from "node:assert/strict";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
 test("versioned migrations are the only runtime schema authority", async () => {
+  // Scan every runtime module, so new routes and services are covered automatically.
+  const runtimePaths = (await Promise.all(["app", "lib", "worker", "db"].map(async (directory) =>
+    (await readdir(new URL(`../${directory}/`, import.meta.url), { recursive: true }))
+      .filter((file) => /\.tsx?$/.test(file))
+      .map((file) => `${directory}/${file}`)))).flat();
+  for (const required of ["app/api/cases/route.ts", "app/api/assistant/runs/route.ts", "lib/ai/service.ts", "worker/assistant-workflow.ts", "db/index.ts"]) {
+    assert.ok(runtimePaths.includes(required), `${required} should be scanned`);
+  }
   const [packageJson, routeSources] = await Promise.all([
     readFile(new URL("../package.json", import.meta.url), "utf8"),
-    Promise.all([
-      "app/api/cases/route.ts",
-      "app/api/intake/route.ts",
-      "app/api/review/route.ts",
-      "app/api/audit/route.ts",
-      "lib/ai/service.ts",
-      "lib/ai/portfolio-agent.ts",
-      "lib/ai/agent-runs.ts",
-      "lib/ai/recurring-followups.ts",
-      "lib/communications/delivery.ts",
-      "app/api/assistant/proposals/route.ts",
-      "app/api/assistant/runs/route.ts",
-      "app/api/assistant/schedules/route.ts",
-      "app/api/assistant/deliveries/route.ts",
-      "worker/assistant-workflow.ts",
-    ].map((path) => readFile(new URL(`../${path}`, import.meta.url), "utf8"))),
+    Promise.all(runtimePaths.map(async (path) => ({ path, text: await readFile(new URL(`../${path}`, import.meta.url), "utf8") }))),
   ]);
   const scripts = JSON.parse(packageJson).scripts;
 
   assert.match(scripts.deploy, /npm run build && npm run db:migrate:remote && wrangler deploy/);
   assert.match(scripts["db:migrate:remote"], /d1 migrations apply DB --remote/);
   assert.match(scripts["db:migrate:test"], /d1 migrations apply DB --local/);
-  for (const source of routeSources) {
-    assert.doesNotMatch(source, /ensureSchema|CREATE TABLE|ALTER TABLE/);
+  for (const { path, text } of routeSources) {
+    assert.doesNotMatch(text, /ensureSchema|CREATE TABLE|ALTER TABLE/, `${path} must not change the schema at runtime`);
   }
   await assert.rejects(access(new URL("../db/ensure.ts", import.meta.url)));
 });
